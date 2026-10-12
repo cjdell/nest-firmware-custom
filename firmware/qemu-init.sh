@@ -62,5 +62,11 @@ echo
 echo "--- GET /api/devices (control port 8082) ---"
 http_get 8082 /api/devices
 echo
+echo "--- GET /debug/status (control port 8082) ---"
+http_get 8082 /debug/status
+echo
+echo "--- GET /debug/report (control port 8082) ---"
+http_get 8082 /debug/report?n=5
+echo
 echo "=== SELF-TEST DONE — dropping to shell (PID 1) ==="
 exec /bin/sh

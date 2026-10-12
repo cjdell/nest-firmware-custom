@@ -40,6 +40,8 @@ done
 
 health=$(curl -s -m 2 http://127.0.0.1:18082/health 2>/dev/null || true)
 devices=$(curl -s -m 2 http://127.0.0.1:18082/api/devices 2>/dev/null || true)
+dbg=$(curl -s -m 3 http://127.0.0.1:18082/debug/status 2>/dev/null || true)
+rep=$(curl -s -m 5 http://127.0.0.1:18082/debug/report?n=5 2>/dev/null || true)
 
 rc=0
 check() {
@@ -53,6 +55,8 @@ check() {
 check "GET /nest/entry"  'transport_url'  "$entry"
 check "GET /health"      '"status":"ok"'  "$health"
 check "GET /api/devices" '"devices"'      "$devices"
+check "GET /debug/status" '"server":"nest-ondevice"' "$dbg"
+check "GET /debug/report" '"system"' "$rep"
 
 echo
 echo "==> guest boot log (tail)"

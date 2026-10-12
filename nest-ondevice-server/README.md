@@ -68,6 +68,29 @@ same routes, so a single port also works):
 | `GET /api/config`, `/api/stats`, `/health` | diagnostics |
 | `POST /api/register`, `GET /api/registered-devices`, `POST /api/ensure-user` | registration |
 
+## Observability (`/debug/*`)
+
+Built for agents debugging a device nobody can console into. Served on both
+ports, read-only except `/debug/loglevel`, gated by `DEBUG_TOKEN` when set
+(`?token=` or `Authorization: Bearer`). Everything is ring-buffered and hard
+capped so a runaway client cannot grow the device heap.
+
+| Endpoint | Notes |
+|---|---|
+| `GET /debug` | endpoint index |
+| `GET /debug/status` | pid, uptime, RSS/threads/fds from `/proc`, request counters, config, device availability |
+| `GET /debug/logs?n=&level=&format=json\|text` | ring-buffered log lines (`level` 0=error…3=debug) |
+| `GET /debug/trace?n=&format=` | recent HTTP exchanges with duration + body snippet (auth header never stored, `api_key`/`token`/`secret`/`password` values scrubbed) |
+| `GET /debug/dmesg?n=` | kernel ring buffer via busybox `dmesg` |
+| `GET /debug/state` | serial/owner/object-key summary (no values) |
+| `GET /debug/report?n=` | **one-shot bundle**: status + logs + trace + dmesg + `uname/free/ps/ifconfig/route/df/mount/uptime/date` + config |
+| `POST\|PUT /debug/loglevel?level=0..3` | change verbosity at runtime |
+
+Env: `DEBUG_ENABLED` (default true), `DEBUG_TOKEN` (unset = open), `LOG_LEVEL`
+(default 2), `DEBUG_LOG_FILE` (optional JSONL mirror, size-rotated at 512 KiB).
+The interactive shell is Dropbear (installed by the GTVHacker `rootme`), not
+this API.
+
 ## Build
 
 Through the repo flake (recommended — same toolchain on every host):
@@ -119,7 +142,10 @@ research doc §5b, recommended sequence step 1).
    ```
 
    Optionally add `${INITDIR}/nest-ondevice start` to `/etc/init.d/rcS` (the same
-   pattern NLE uses for `nleapi`) and a `monit` check to keep it running.
+   pattern NLE uses for `nleapi`). The init script already starts syslog into
+   `/media/log/messages`, supervises the daemon with the shipped `monit` (or its
+   own loop when monit is absent), and records the last exit status under
+   `/media/data/nest-ondevice/last-exit`.
 
 4. Point Hubitat at `http://<nest-lan-ip>:8082`.
 
@@ -128,7 +154,9 @@ research doc §5b, recommended sequence step 1).
 All via environment (see `deploy/nest-ondevice.init`): `API_ORIGIN`,
 `SERVER_PORT`, `CONTROL_PORT`, `DATA_DIR`, `SUSPEND_TIME_MAX`,
 `DEFER_DEVICE_WINDOW`, `DISABLE_DEFER_WINDOW`, `REQUIRE_DEVICE_PAIRING`,
-`ENTRY_KEY_TTL_SECONDS`, `USER_ID`, `STORE_DEVICE_LOGS`, `SERVER_HOST`.
+`ENTRY_KEY_TTL_SECONDS`, `USER_ID`, `STORE_DEVICE_LOGS`, `SERVER_HOST`, and the
+observability knobs `DEBUG_ENABLED`, `DEBUG_TOKEN`, `LOG_LEVEL`,
+`DEBUG_LOG_FILE`.
 
 `API_ORIGIN` is the address handed back to the thermostat; use its LAN IP (not
 `127.0.0.1`) if you also want Hubitat or other hosts to reach it.
@@ -144,8 +172,9 @@ python3 test_smoke.py
 ```
 
 It covers entry discovery, first subscribe + auto-pairing, PUT semantics, a held
-chunked subscribe receiving a command push, and status/devices/command on the
-control API.
+chunked subscribe receiving a command push, status/devices/command on the
+control API, and the `/debug/*` surface (status/logs/trace/report/loglevel/state,
+including a check that the auth password never leaks into a trace).
 
 ## Caveats
 

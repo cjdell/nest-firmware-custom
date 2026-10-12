@@ -76,10 +76,12 @@ device nodes). It:
 1. copies every existing entry byte-for-byte, including each device node's
    major/minor (they used to be zeroed — masked on-device by devtmpfs, but
    fatal to an initramfs that relies on its static `/dev`),
-2. adds `/usr/bin/nest-ondevice` and `/etc/init.d/nest-ondevice`,
+2. adds `/usr/bin/nest-ondevice`, `/etc/init.d/nest-ondevice`, and
+   `/etc/monit.d/nest-ondevice.monitrc`,
 3. patches `/etc/init.d/rootme` — the script that installs persistent files to
-   `mtdblock7` — **before** it runs `umount /tmp/1`, so the server is copied to
-   the flash and `${INITDIR}/nest-ondevice start` is appended to `rcS`.
+   `mtdblock7` — **before** it runs `umount /tmp/1`, so the server, its init
+   script and the monit config are copied to the flash and
+   `${INITDIR}/nest-ondevice start` is appended to `rcS`.
 
 The kernel's `CONFIG_INITRAMFS_SOURCE="../initramfs_data.cpio"` then embeds the
 patched cpio, and `mkimage` produces the `uImage`.
@@ -87,6 +89,28 @@ patched cpio, and `mkimage` produces the `uImage`.
 At runtime `nest-ondevice` listens on the device port (default 8000) and the
 control port (default 8082) with state under `/media/data/nest-ondevice`; see
 `../nest-ondevice-server/README.md`.
+
+## Observability on the device
+
+Flashing this image gives agents four layers of visibility, cheapest first:
+
+1. **`/debug/*` on the control port** — read-only structured JSON: `/debug/report`
+   is a one-shot bundle (status + logs + request trace + dmesg + `free`/`ps`/
+   `ifconfig`/`route`/`df`/`mount`). Set `DEBUG_TOKEN` in
+   `/etc/init.d/nest-ondevice` before relying on it on an untrusted LAN. The
+   daemon mirrors its log as JSONL to `/media/data/nest-ondevice/nest-ondevice.jsonl`
+   (size-rotated); raw stdout/stderr goes to `nest-ondevice.out`.
+2. **Dropbear SSH** — the GTVHacker `rootme` already copies `dropbearmulti` to
+   `mtdblock7` and appends `/bin/dropbear` (+ the `autossh` reverse tunnel) to
+   `rcS`, so this is *already installed*; nothing here adds it.
+3. **Persistent logs + supervision** — `/etc/init.d/nest-ondevice` starts
+   `syslogd/klogd` writing to `/media/log/messages` (jffs2; the vendor default
+   `/var/log` is tmpfs and loses everything on reboot), supervises the daemon
+   with the shipped `monit` (falling back to its own `wait`-based loop when monit
+   is absent), and appends each exit status to
+   `/media/data/nest-ondevice/last-exit`.
+4. **UART** — `/etc/init.d/start` already spawns a root shell on `/dev/ttyO0`
+   at 115200; the only channel that sees pre-userspace failures.
 
 ## QEMU smoke test (no thermostat needed)
 
@@ -102,9 +126,10 @@ bash firmware/qemu-smoke.sh
 The boot is the real thing (same kernel, same rootfs, the static musl server),
 with a qemu-only `/qemu-init` used as `rdinit` that skips the hardware-only
 `rcS` (mtdblock7/tiwlan/`rootme`'s reboot). It prints the guest's
-`/proc/version`, starts the server, self-tests over loopback with busybox `nc`,
-and the script also hits `:18000`/`:18082` through qemu's user-net port
-forwards.
+`/proc/version`, starts the server, self-tests over loopback with busybox `nc`
+(including `/debug/status` and `/debug/report`, which exercises the busybox
+`dmesg`/`free`/`ps` applets on the real rootfs), and the script also hits
+`:18000`/`:18082` through qemu's user-net port forwards.
 
 Three RealView/PB-A8 traps are baked into `firmware/qemu.nix`:
 

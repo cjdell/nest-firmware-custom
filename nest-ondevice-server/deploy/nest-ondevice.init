@@ -1,58 +1,115 @@
 #!/bin/sh
 # /etc/init.d/nest-ondevice
 #
-# Start the on-device Nest-protocol server. Deploy the static binary to
-# /media/scratch/nest-ondevice and make this script executable. It is written
-# for the BusyBox ash on the Nest rootfs (mtdblock7).
+# Start the on-device Nest-protocol server plus its observability plumbing.
+# Deploy the static binary to /media/scratch/nest-ondevice and make this script
+# executable. Written for the BusyBox ash on the Nest rootfs (mtdblock7).
 #
 # Point the thermostat at itself by setting cloudregisterurl in
 # /etc/nestlabs/client.config to http://127.0.0.1:8000/entry (the NLE settings
 # CGI does this), then restart the `nestlabs` service.
+#
+# Observability (see /debug/* on CONTROL_PORT):
+#   * syslogd/klogd -> /media/log/messages     (jffs2; /var/log is tmpfs)
+#   * daemon JSONL log -> /media/data/nest-ondevice/nest-ondevice.log
+#   * monit supervision when /usr/sbin/monit exists, else a restart loop
+#   * daemon exit status -> /media/data/nest-ondevice/last-exit
 
 DAEMON=/media/scratch/nest-ondevice
 PIDFILE=/var/run/nest-ondevice.pid
-LOGFILE=/media/log/nest-ondevice.log
+DATA_DIR=/media/data/nest-ondevice
+LOGDIR=/media/log
+LASTEXIT=$DATA_DIR/last-exit
+MONITRC=/etc/monit.d/nest-ondevice.monitrc
+MONITRC_MAIN=/etc/monitrc
+
+[ -x "$DAEMON" ] || exit 0
+
+mkdir -p "$DATA_DIR" "$LOGDIR" 2>/dev/null
 
 # Bind to the LAN IP so Hubitat can reach the control API. Set API_ORIGIN to the
 # same address so URLs handed to the thermostat are reachable.
-API_ORIGIN=${API_ORIGIN:-http://127.0.0.1:8000}
-export API_ORIGIN
+export API_ORIGIN=${API_ORIGIN:-http://127.0.0.1:8000}
 export SERVER_PORT=${SERVER_PORT:-8000}
 export CONTROL_PORT=${CONTROL_PORT:-8082}
-export DATA_DIR=${DATA_DIR:-/media/data/nest-ondevice}
+export DATA_DIR
 export SUSPEND_TIME_MAX=${SUSPEND_TIME_MAX:-300}
 export DEFER_DEVICE_WINDOW=${DEFER_DEVICE_WINDOW:-15}
 export REQUIRE_DEVICE_PAIRING=${REQUIRE_DEVICE_PAIRING:-false}
+export LOG_LEVEL=${LOG_LEVEL:-2}
+# JSONL mirror written by the daemon (rotated at 512 KiB); raw stdout/stderr goes
+# to nest-ondevice.out so the two never interleave.
+export DEBUG_LOG_FILE=${DEBUG_LOG_FILE:-$DATA_DIR/nest-ondevice.jsonl}
+# Uncomment to require ?token= / Authorization: Bearer on every /debug/* call:
+# export DEBUG_TOKEN=change-me
+
+running() {
+    [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null
+}
+
+start_logging() {
+    if [ -d "$LOGDIR" ]; then
+        pidof syslogd >/dev/null 2>&1 || \
+            syslogd -O "$LOGDIR/messages" -s 384 -b 31 -u >/dev/null 2>&1
+        pidof klogd >/dev/null 2>&1 || klogd >/dev/null 2>&1
+    fi
+}
+
+start_daemon() {
+    running && return 0
+    "$DAEMON" >>"$DATA_DIR/nest-ondevice.out" 2>&1 &
+    echo $! > "$PIDFILE"
+    echo "$(date): started pid $!" >> "$LASTEXIT"
+}
+
+have_monit() {
+    [ -x /usr/sbin/monit ] && [ -f "$MONITRC" ] && [ -f "$MONITRC_MAIN" ]
+}
+
+start_monit() {
+    have_monit || return 1
+    pidof monit >/dev/null 2>&1 && return 0
+    /usr/sbin/monit -c "$MONITRC_MAIN" >/dev/null 2>&1
+    sleep 1
+    pidof monit >/dev/null 2>&1
+}
+
+supervise_loop() {
+    while :; do
+        start_daemon
+        pid=$(cat "$PIDFILE" 2>/dev/null)
+        [ -n "$pid" ] && wait "$pid"
+        rc=$?
+        echo "$(date): nest-ondevice pid ${pid:-?} exited rc=$rc" >> "$LASTEXIT"
+        sleep 5
+    done
+}
 
 start() {
-    [ -x "$DAEMON" ] || { echo "missing $DAEMON"; exit 1; }
-    mkdir -p "$DATA_DIR"
-    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-        echo "nest-ondevice already running"
-        return 0
+    start_logging
+    start_daemon
+    if start_monit; then
+        echo "$(date): supervised by monit" >> "$LASTEXIT"
+    else
+        supervise_loop &
     fi
-    echo "starting nest-ondevice"
-    "$DAEMON" >>"$LOGFILE" 2>&1 &
-    echo $! > "$PIDFILE"
 }
 
 stop() {
-    [ -f "$PIDFILE" ] || return 0
-    echo "stopping nest-ondevice"
-    kill "$(cat "$PIDFILE")" 2>/dev/null
-    rm -f "$PIDFILE"
+    pidof monit >/dev/null 2>&1 && /usr/sbin/monit -c "$MONITRC_MAIN" stop nest-ondevice >/dev/null 2>&1
+    if [ -f "$PIDFILE" ]; then
+        kill "$(cat "$PIDFILE")" 2>/dev/null
+        rm -f "$PIDFILE"
+    fi
 }
 
 case "$1" in
     start) start ;;
+    start-daemon) start_logging; start_daemon ;;
     stop) stop ;;
     restart) stop; sleep 1; start ;;
     status)
-        if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-            echo "running (pid $(cat "$PIDFILE"))"
-        else
-            echo "stopped"
-        fi
+        if running; then echo "running (pid $(cat "$PIDFILE"))"; else echo "stopped"; fi
         ;;
-    *) echo "usage: $0 {start|stop|restart|status}"; exit 1 ;;
+    *) echo "usage: $0 {start|start-daemon|stop|restart|status}"; exit 1 ;;
 esac

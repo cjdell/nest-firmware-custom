@@ -6,7 +6,7 @@ nodes and symlinks) are copied verbatim, so no root/`mknod` is required. That
 matters because Nix builds run unprivileged and cannot recreate /dev entries.
 
 Usage:
-  inject_initramfs.py BASE.cpio OUT.cpio BINARY INIT_SCRIPT
+  inject_initramfs.py BASE.cpio OUT.cpio BINARY INIT_SCRIPT MONITRC
 """
 import sys
 
@@ -59,6 +59,10 @@ cp /usr/bin/nest-ondevice /tmp/1/usr/bin/nest-ondevice 2>/dev/null || true
 chmod 755 /tmp/1/usr/bin/nest-ondevice 2>/dev/null || true
 cp /etc/init.d/nest-ondevice /tmp/1/etc/init.d/nest-ondevice 2>/dev/null || true
 chmod 755 /tmp/1/etc/init.d/nest-ondevice 2>/dev/null || true
+# monit config: the init script starts monit when present, and this must live on
+# the flash rootfs (mtdblock7) so it survives the initramfs -> flash reboot.
+mkdir -p /tmp/1/etc/monit.d
+cp /etc/monit.d/nest-ondevice.monitrc /tmp/1/etc/monit.d/nest-ondevice.monitrc 2>/dev/null || true
 if [ -f /tmp/1/etc/init.d/rcS ] && ! grep -q 'nest-ondevice start' /tmp/1/etc/init.d/rcS; then
   echo '${INITDIR}/nest-ondevice start' >> /tmp/1/etc/init.d/rcS
 fi
@@ -89,13 +93,15 @@ def patch_rootme(body):
 
 
 def main():
-    base_path, out_path, bin_path, init_path = sys.argv[1:5]
+    base_path, out_path, bin_path, init_path, monitrc_path = sys.argv[1:6]
     with open(base_path, "rb") as fh:
         entries = parse(fh.read())
     with open(bin_path, "rb") as fh:
         binary = fh.read()
     with open(init_path, "rb") as fh:
         init = fh.read()
+    with open(monitrc_path, "rb") as fh:
+        monitrc = fh.read()
 
     next_ino = 0x10000
     for e in entries:
@@ -115,6 +121,8 @@ def main():
             out.append(emit([next_ino, 0o100755, 0, 0, 1, 0, "usr/bin/nest-ondevice", binary, 0, 0]))
             next_ino += 1
             out.append(emit([next_ino, 0o100755, 0, 0, 1, 0, "etc/init.d/nest-ondevice", init, 0, 0]))
+            next_ino += 1
+            out.append(emit([next_ino, 0o100644, 0, 0, 1, 0, "etc/monit.d/nest-ondevice.monitrc", monitrc, 0, 0]))
             next_ino += 1
             out.append(emit(e))
         else:

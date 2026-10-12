@@ -24,6 +24,11 @@ pub struct Config {
     pub user_id: String,
     pub store_device_logs: bool,
     pub weather_cache_ttl: u64,
+    /// Observability knobs for the `/debug/*` surface. See `debug.rs`.
+    pub debug_enabled: bool,
+    pub debug_token: Option<String>,
+    pub debug_log_file: Option<PathBuf>,
+    pub log_level: u8,
 }
 
 impl Config {
@@ -56,6 +61,10 @@ impl Config {
             user_id: env::var("USER_ID").unwrap_or_else(|_| "homeassistant".to_string()),
             store_device_logs: env_bool("STORE_DEVICE_LOGS", false),
             weather_cache_ttl: env_num("WEATHER_CACHE_TTL_MS", 600_000) / 1000,
+            debug_enabled: env_bool("DEBUG_ENABLED", true),
+            debug_token: env::var("DEBUG_TOKEN").ok().filter(|s| !s.is_empty()),
+            debug_log_file: env::var("DEBUG_LOG_FILE").ok().filter(|s| !s.is_empty()).map(PathBuf::from),
+            log_level: env_num("LOG_LEVEL", 2).min(3) as u8,
         }
     }
 }

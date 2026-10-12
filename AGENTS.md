@@ -20,6 +20,7 @@ then `docs/nest-ondevice-protocol-research.md` for the protocol rationale.
 | Topic | File |
 |---|---|
 | Protocol, bucket semantics, Option A rationale | `docs/nest-ondevice-protocol-research.md` |
+| **On-device observability (`/debug/*`, syslog, monit, Dropbear, UART)** | `firmware/README.md` § "Observability on the device" + `nest-ondevice-server/README.md` § "/debug/*" |
 | Server behaviour / control API / flashing-lite notes | `nest-ondevice-server/README.md` |
 | **Firmware build constraints + traps + verification** | `firmware/README.md` |
 | Top-level build/entry points | `README.md` |
@@ -28,7 +29,7 @@ then `docs/nest-ondevice-protocol-research.md` for the protocol rationale.
 
 | Constraint | Consequence |
 |---|---|
-| Nest = ARMv7 Cortex-A8, **soft-float EABI** (`ld-linux.so.3`), Linux **2.6.37**, 64 MiB RAM | Target triple is `armv7-unknown-linux-musleabi` (**not** `…eabihf`). Static musl. Server is `std`, no tokio, small-stack threads; ARM binary ≈ 624 KB, measured ~1.7 MB RSS (host proxy, not yet on glass). |
+| Nest = ARMv7 Cortex-A8, **soft-float EABI** (`ld-linux.so.3`), Linux **2.6.37**, 64 MiB RAM | Target triple is `armv7-unknown-linux-musleabi` (**not** `…eabihf`). Static musl. Server is `std`, no tokio, small-stack threads; ARM binary ≈ 735 KB (was ~624 KB before the `/debug/*` surface), measured ~1.7 MB RSS (host proxy, not yet on glass). |
 | Kernel is GTVHacker's 2.6.37 in `NestDFUAttack/Dev/linux` | Any kernel change must survive `make ARCH=arm gtvhacker_defconfig` + the 2008 toolchain. |
 | Cross toolchain `NestDFUAttack/Dev/toolchain/arm-2008q3` is **i686** (32-bit x86) | It cannot run natively on modern hosts. See traps. |
 | `CONFIG_INITRAMFS_SOURCE="../initramfs_data.cpio"` (`gtvhacker_defconfig:81`) | The initramfs is the injection point; the server lands at `/usr/bin/nest-ondevice`. |
@@ -72,12 +73,10 @@ python3 nest-ondevice-server/test_smoke.py
 
 **Verified build (2026-10-12).** Native x86_64-linux (`zen3-nixos`), `nix
 build --impure .#firmware` →
-`/nix/store/7jlzd05jfh3fy5w8w3zdb0kwpdkdqq78-nest-firmware-1.0.0`,
-`uImage` sha256 `5d4a35b674da5c4b85be2623aa20aa0e3c628b33945a84e2a486c07013e5cf72`,
-7,230,916 bytes, ~**35 s** with the native i686 toolchain (was ~3m00s under
-qemu-i386). The hash changed from the earlier `6a6f450a…` image because the
-device major/minor fix alters the embedded cpio. Re-running is cached (same
-store path, no rebuild).
+`/nix/store/jsl835n1jp4kzl96bklr8hqlkb5m0919-nest-firmware-1.0.0`,
+`uImage` sha256 `a9d81aec22a56848e5ef43e93d32be589cae9e14699e1a595e713fe78f0ef2c1`,
+7,269,188 bytes, ~**37 s** with the native i686 toolchain (was ~3m00s under
+qemu-i386). Re-running is cached (same store path, no rebuild).
 
 Decompress-and-grep check that the server is *inside* the image:
 
@@ -192,7 +191,10 @@ docs/nest-ondevice-protocol-research.md
 * **On-hardware validation** — flash the `uImage` via the existing
   `NestDFUAttack` flow (`Release/Nest`, `omap3_usbload`) and confirm: first boot
   copies the server to flash, `rcS` starts it, the app talks to `127.0.0.1:8000`,
-  and Hubitat reaches `:8082`. Measure real RSS (`free`, `/proc/*/status`).
+  and Hubitat reaches `:8082`. First stop for a bug is `GET /debug/report` on
+  `:8082` (it pulls RSS, `free`/`ps`/`ifconfig`, dmesg and the request trace in
+  one call); Dropbear (`rootme` installs it) gives a shell and
+  `/media/log/messages` + `/media/data/nest-ondevice/last-exit` survive a reboot.
 * Calibrate the app's expected `structure.*`/`user.*` fields against captured
   real traffic, using the Python NoLongerEvil server as a differential oracle.
 * Optional: shrink the firmware build by using a user-mode-only qemu instead of

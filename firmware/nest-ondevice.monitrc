@@ -1,0 +1,14 @@
+#
+#    nest-ondevice.monitrc
+#
+#    Installed to /etc/monit.d/nest-ondevice.monitrc by the nest-ondevice flake
+#    (copied to mtdblock7 by the injected rootme block). The Nest rootfs already
+#    ships monit and supervises nlclient this way; the on-device init script
+#    starts monit when it is present and otherwise falls back to its own loop.
+#
+#    `start-daemon` launches only the daemon (not monit itself), avoiding the
+#    recursion you would get from calling the full `start` action.
+#
+check process nest-ondevice with pidfile "/var/run/nest-ondevice.pid"
+  start program = "/etc/init.d/nest-ondevice start-daemon" with timeout 15 seconds
+  stop  program = "/etc/init.d/nest-ondevice stop"

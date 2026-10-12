@@ -1,5 +1,6 @@
 mod config;
 mod control;
+mod debug;
 mod http;
 mod nest;
 mod server;
@@ -33,11 +34,14 @@ pub struct App {
     /// device's in-memory mode may have reset across a reboot.
     pub structure_sent: Mutex<HashSet<String>>,
     pub started_ms: i64,
+    /// Ring-buffered logs/traces and the `/debug/*` surface.
+    pub debug: debug::Debug,
 }
 
 impl App {
     pub fn new(cfg: Config) -> App {
         let store = Store::load(&cfg.data_dir);
+        let debug = debug::Debug::new(&cfg);
         App {
             cfg,
             store: Mutex::new(store),
@@ -45,6 +49,7 @@ impl App {
             avail: Mutex::new(HashMap::new()),
             structure_sent: Mutex::new(HashSet::new()),
             started_ms: now_ms(),
+            debug,
         }
     }
 
@@ -121,6 +126,17 @@ fn main() {
     let _ = std::fs::create_dir_all(&cfg.data_dir);
 
     let app = Arc::new(App::new(cfg.clone()));
+    app.debug.log(
+        2,
+        format!(
+            "nest-ondevice {} starting: device_port={} control_port={} data_dir={} debug={}",
+            env!("CARGO_PKG_VERSION"),
+            cfg.device_port,
+            cfg.control_port,
+            cfg.data_dir.display(),
+            if cfg.debug_enabled { "on" } else { "off" }
+        ),
+    );
 
     // Periodic, debounced persistence to keep NAND writes low.
     {
@@ -148,10 +164,12 @@ fn main() {
             Ok(l) => l,
             Err(e) => {
                 eprintln!("failed to bind {addr}: {e}");
+                app.debug.error(format!("failed to bind {addr}: {e}"));
                 continue;
             }
         };
         println!("listening on {addr}");
+        app.debug.log(2, format!("listening on {addr}"));
         handles.push(
             thread::Builder::new()
                 .stack_size(256 * 1024)

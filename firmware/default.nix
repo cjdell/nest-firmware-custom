@@ -130,7 +130,8 @@ EOF
       python3 ${./inject_initramfs.py} \
         ${attack.initramfs} "$out/initramfs.cpio" \
         ${nest-ondevice}/bin/nest-ondevice \
-        ${./nest-ondevice.init}
+        ${./nest-ondevice.init} \
+        ${./nest-ondevice.monitrc}
     '';
 
     firmware = pkgs.stdenv.mkDerivation {

@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use crate::debug::Trace;
 use crate::http;
 use crate::nest::{self, SubscribeOutcome};
 use crate::{control, util, App};
@@ -33,21 +34,27 @@ fn handle_conn(mut stream: TcpStream, app: Arc<App>) -> io::Result<()> {
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
     stream.set_nodelay(true).ok();
 
+    let remote = stream
+        .peer_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_default();
     let read_half = stream.try_clone()?;
     let mut reader = BufReader::new(read_half);
 
     loop {
+        let t0 = util::now_ms();
         let req = match http::read_request(&mut reader) {
             Ok(Some(r)) => r,
             Ok(None) => return Ok(()),
             Err(_) => return Ok(()),
         };
 
-        if let Some(serial) = nest::extract_serial(&req) {
-            app.mark_seen(&serial);
+        let serial = nest::extract_serial(&req);
+        if let Some(s) = &serial {
+            app.mark_seen(s);
             if let Some(auth) = req.header("authorization") {
                 if let Some(pw) = util::basic_auth_password(auth) {
-                    app.remember_api_key(&serial, &pw);
+                    app.remember_api_key(s, &pw);
                 }
             }
         }
@@ -55,6 +62,15 @@ fn handle_conn(mut stream: TcpStream, app: Arc<App>) -> io::Result<()> {
         if nest::is_subscribe(&req) {
             match nest::prepare_subscribe(&app, &req) {
                 SubscribeOutcome::Normal(resp) => {
+                    app.debug.record(Trace::capture(
+                        &req,
+                        &remote,
+                        serial.as_deref(),
+                        resp.status,
+                        util::now_ms() - t0,
+                        resp.body.len(),
+                        None,
+                    ));
                     http::write_response(&mut stream, &resp)?;
                     return Ok(());
                 }
@@ -63,14 +79,32 @@ fn handle_conn(mut stream: TcpStream, app: Arc<App>) -> io::Result<()> {
                     initial,
                     headers,
                 } => {
-                    handle_held(&mut stream, &app, &serial, initial, &headers)?;
-                    return Ok(());
+                    let result = handle_held(&mut stream, &app, &serial, initial, &headers);
+                    app.debug.record(Trace::capture(
+                        &req,
+                        &remote,
+                        Some(&serial),
+                        200,
+                        util::now_ms() - t0,
+                        0,
+                        Some("held".to_string()),
+                    ));
+                    return result;
                 }
             }
         }
 
         let resp = route(&app, &req);
         let close = req.wants_close();
+        app.debug.record(Trace::capture(
+            &req,
+            &remote,
+            serial.as_deref(),
+            resp.status,
+            util::now_ms() - t0,
+            resp.body.len(),
+            None,
+        ));
         http::write_response(&mut stream, &resp)?;
         if close {
             return Ok(());
@@ -81,6 +115,9 @@ fn handle_conn(mut stream: TcpStream, app: Arc<App>) -> io::Result<()> {
 fn route(app: &App, req: &crate::http::Request) -> http::Response {
     if req.path == "/health" {
         return http::Response::json("{\"status\":\"ok\"}".to_string());
+    }
+    if let Some(resp) = crate::debug::route(app, req) {
+        return resp;
     }
     if let Some(resp) = nest::route(app, req) {
         return resp;

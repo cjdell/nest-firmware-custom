@@ -6,7 +6,7 @@ Two pieces:
 
 | Path | What it is |
 |---|---|
-| [`nest-ondevice-server/`](nest-ondevice-server/) | A compact **Rust** port of the NoLongerEvil Nest-protocol server, sized to run on the thermostat itself. |
+| [`nest-ondevice-server/`](nest-ondevice-server/) | A compact **Rust** port of the NoLongerEvil Nest-protocol server, sized to run on the thermostat itself, with a read-only `/debug/*` observability API for agent/remote debugging. |
 | [`firmware/`](firmware/) | A **firmware image** (the GTVHacker `uImage`) that bundles that server into the initramfs. |
 
 The protocol research and the design rationale live in
