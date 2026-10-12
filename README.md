@@ -21,9 +21,11 @@ nix build .#initramfs       # the intermediate patched cpio       (Linux only)
 ```
 
 `.#firmware` needs the vendored GTVHacker checkout for the kernel, base
-initramfs and 2008 ARM toolchain:
+initramfs and 2008 ARM toolchain. It is the `NestDFUAttack` submodule, pinned
+to an upstream commit:
 
 ```sh
+git submodule update --init NestDFUAttack   # fresh clone only
 export NEST_ATTACK_DIR=$PWD/NestDFUAttack
 nix build .#firmware
 ```
@@ -61,5 +63,8 @@ nest-ondevice-server/         # the Rust server
 docs/nest-ondevice-protocol-research.md
 ```
 
-The vendored upstream trees (`NestDFUAttack/`, `NoLongerEvil-*`, `hubitatcontrol/`)
-are git-ignored nested checkouts and are not part of the flake source.
+`NestDFUAttack/` is a **submodule** pinned to an upstream commit and tracked
+via `.gitmodules` (run `git submodule update --init` after cloning). The other
+upstream trees (`NoLongerEvil-*`, `hubitatcontrol/`) are git-ignored sibling
+checkouts used only as references; none are flake inputs. The builder stages
+`NestDFUAttack/` into the Linux VM as `NEST_ATTACK_DIR`.

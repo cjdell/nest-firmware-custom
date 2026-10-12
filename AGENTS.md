@@ -6,9 +6,11 @@ a Nix flake that cross-compiles it and bakes it into a flashable `uImage`
 (`firmware/`). The device is pointed at `127.0.0.1` (Option A in the research
 doc), so the thermostat is self-contained and Hubitat talks to it on the LAN.
 
-**Repo state (2026-10-12).** `git init` only — **no commits yet** (nothing is
-required to be committed). The build is green and the image is verified to
-contain the server, but **nothing has run on real hardware yet**.
+**Repo state (2026-10-12).** Committed. `NestDFUAttack/` is pinned as a git
+submodule at upstream `exploiteers/NestDFUAttack` (the exact commit is in the
+index; `ignore = dirty` because a macOS checkout collapses its case-only paths).
+The build is green and the image is verified to contain the server, but
+**nothing has run on real hardware yet**.
 
 Read this file, then `README.md`, then `firmware/README.md` if building images,
 then `docs/nest-ondevice-protocol-research.md` for the protocol rationale.
@@ -40,6 +42,7 @@ then `docs/nest-ondevice-protocol-research.md` for the protocol rationale.
 nix build .#nest-ondevice
 
 # Firmware image (needs Linux + the vendored tree)
+git submodule update --init NestDFUAttack   # fresh clone only
 export NEST_ATTACK_DIR=$PWD/NestDFUAttack
 nix build .#firmware            # -> uImage
 nix build .#initramfs           # -> initramfs.cpio
@@ -101,10 +104,13 @@ PY
    case (`net/netfilter/xt_HL.c` ↔ `xt_hl.c`, `xt_MARK.h` ↔ `xt_mark.h`, …) with
    **different contents**; a macOS checkout keeps one and `make` fails with
    `No rule to make target 'net/netfilter/xt_HL.o'`. **Fix:**
-   `bin/macos/vm-build.sh` runs
-   `git -C $attack archive HEAD Dev/linux | tar -x -C /tmp/nest-linux-fixed`
-   (case-exact) and exports `NEST_LINUX_DIR`. Do **not** "fix" this by renaming
-   files — they are distinct modules.
+   `bin/macos/build.sh` archives `Dev/linux` on the *host* with
+   `git -C $attack archive HEAD Dev/linux` (case-exact: git reads the object
+   DB, not the collapsed checkout), writes `$out/.attack-linux.tar`, and
+   `vm-build.sh` extracts it to `/tmp/nest-linux-fixed`, exporting
+   `NEST_LINUX_DIR`. (A native Linux host falls back to `git archive | tar -x`
+   in the VM.) Do **not** "fix" this by renaming files — they are distinct
+   modules.
 
 4. **`buildRustPackage` hooks force `--target <host>`.** nixpkgs'
    `cargo-build-hook` passes `--target @rustcTargetSpec@`, which silently
@@ -131,15 +137,18 @@ PY
    `lib.fileset.toSource` (only `Cargo.toml`, `Cargo.lock`, `src/`), so editing
    a README no longer invalidates the ~3m40s kernel build. Keep it that way.
 
-10. **The vendored trees are not flake inputs.** `NestDFUAttack/`,
-    `NoLongerEvil-*`, `hubitatcontrol/` are git-ignored nested checkouts, pulled
-    in *impurely* via `NEST_ATTACK_DIR` (and `NEST_LINUX_DIR`). With them unset
-    the flake still evaluates and `.#nest-ondevice` builds.
+10. **The vendored trees are not flake inputs.** `NestDFUAttack/` is a pinned
+    git submodule (`.gitmodules`); the `NoLongerEvil-*` and `hubitatcontrol/`
+    trees are git-ignored sibling checkouts. All are read *impurely* via
+    `NEST_ATTACK_DIR` (and `NEST_LINUX_DIR`). With them unset the flake still
+    evaluates and `.#nest-ondevice` builds, so a fresh clone only needs
+    `git submodule update --init` before `.#firmware`.
 
 ## Layout
 
 ```
 flake.nix                     deps + packages (nest-ondevice, firmware, initramfs) + devShell
+.gitmodules                   pins NestDFUAttack/ to upstream exploiteers/NestDFUAttack
 firmware/
   default.nix                 qemu-i386 toolchain wrappers + kernel make + mkimage
   inject_initramfs.py         archive-level injection + rootme patch (order-sensitive)

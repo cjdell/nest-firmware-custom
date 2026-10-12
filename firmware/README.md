@@ -57,10 +57,12 @@ only one of each pair and `make` fails with `No rule to make target
 'net/netfilter/xt_HL.o'`. The virtiofs mount of that checkout carries the same
 damage into the VM.
 
-`bin/macos/vm-build.sh` therefore re-materialises `Dev/linux` from the git tree
-(`git archive HEAD Dev/linux`), which is case-exact, into the VM's
-case-sensitive `/tmp`, and points the build at it via `NEST_LINUX_DIR`. On a
-case-sensitive host this is effectively a no-op but is still correct.
+`bin/macos/build.sh` therefore archives `Dev/linux` **on the host** with
+`git archive HEAD Dev/linux` — git reads the object database and is case-exact
+— and hands the tarball to the VM. `bin/macos/vm-build.sh` extracts it onto the
+case-sensitive `/tmp` and points the build at it via `NEST_LINUX_DIR`. On a
+native case-sensitive host `vm-build.sh` falls back to `git archive` directly;
+either way the build sees the same content.
 
 ## How the server gets in
 
@@ -102,9 +104,9 @@ NEST_ATTACK_DIR=$PWD/NestDFUAttack ./bin/macos/vm-build.sh firmware
 nix build .#firmware          # from an aarch64-linux / x86_64-linux host
 ```
 
-`NEST_ATTACK_DIR` must point at the vendored GTVHacker checkout (the kernel,
-base initramfs and toolchain are not committed here). With it unset the flake
-still evaluates and `nix build .#nest-ondevice` works anywhere.
+`NEST_ATTACK_DIR` must point at the vendored GTVHacker checkout (the `NestDFUAttack`
+submodule; run `git submodule update --init` after cloning). With it unset the
+flake still evaluates and `nix build .#nest-ondevice` works anywhere.
 
 ## Flashing (untested on hardware)
 

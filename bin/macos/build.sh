@@ -103,8 +103,25 @@ start_build() {
 
     rm -f "$out/$target.rc"
     : > "$out/$target.log"
+
+    # The vendored kernel has case-only path collisions (xt_HL.c/xt_hl.c, …)
+    # that macOS APFS collapses onto one on-disk name, so the mounted checkout
+    # carries the damage into the VM. Archive Dev/linux *on the host* — git
+    # reads the object database and is case-exact — and let the VM extract it
+    # onto its case-sensitive filesystem. This works for either submodule
+    # layout (self-contained `.git` dir or an absorbed gitfile).
+    linux_tar=
+    if [ -e "$attack/.git" ] && command -v git >/dev/null 2>&1; then
+        linux_tar=$out/.attack-linux.tar
+        git -C "$attack" -c safe.directory='*' archive --format=tar HEAD Dev/linux \
+            > "$linux_tar.part"
+        mv -f "$linux_tar.part" "$linux_tar"
+        echo "macos/build: case-exact Dev/linux archived -> $linux_tar" >&2
+    fi
+
     container exec -d "$cname" sh -c \
         "NEST_HOST_REV='$rev' NEST_SRC=/src NEST_OUT=/out NEST_ATTACK=/nest/attack \
+         NEST_LINUX_TAR='$linux_tar' \
          sh /src/bin/macos/vm-build.sh $target > /out/$target.log 2>&1; \
          echo \$? > /out/$target.rc" \
         >/dev/null

@@ -1,0 +1,5 @@
+[submodule "NestDFUAttack"]
+	path = NestDFUAttack
+	url = https://github.com/exploiteers/NestDFUAttack.git
+	branch = master
+	ignore = dirty

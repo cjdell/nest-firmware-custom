@@ -44,17 +44,29 @@ fi
 # The vendored kernel is a git checkout. On a case-insensitive filesystem
 # (macOS, and the virtiofs mount of it) git's case-distinct netfilter sources
 # collapse onto one on-disk name, so make cannot find e.g. net/netfilter/xt_HL.c.
-# Re-materialise Dev/linux from the git tree, which is case-exact, into the VM's
-# case-sensitive /tmp. (On a case-sensitive host this is a no-op in effect.)
-linux_src=$attack/Dev/linux
-if [ -d "$linux_src" ] && [ -d "$attack/.git" ] && command -v git >/dev/null 2>&1; then
-    fixed=${NEST_LINUX_FIXED:-/tmp/nest-linux-fixed}
+# Re-materialise Dev/linux case-exactly onto this case-sensitive filesystem:
+# prefer the host-made tarball (bin/macos/build.sh), and fall back to archiving
+# straight from git (native Linux, or a self-contained checkout).
+fixed=${NEST_LINUX_FIXED:-/tmp/nest-linux-fixed}
+if [ -n "${NEST_LINUX_TAR:-}" ] && [ -f "$NEST_LINUX_TAR" ]; then
+    # Case-exact kernel pre-archived on the host (bin/macos/build.sh); extract
+    # it onto this case-sensitive filesystem before nix reads it.
+    rm -rf "$fixed"
+    mkdir -p "$fixed"
+    tar -x -C "$fixed" < "$NEST_LINUX_TAR"
+    export NEST_LINUX_DIR="$fixed/Dev/linux"
+    echo "vm-build: case-fixed kernel (tar) -> $NEST_LINUX_DIR"
+elif [ -e "$attack/.git" ] && command -v git >/dev/null 2>&1; then
+    # No pre-made archive: re-materialise Dev/linux from git directly. This is
+    # the native-Linux path and also works for a self-contained submodule
+    # checkout; an *absorbed* submodule has its gitdir outside the mount and
+    # relies on the host archive above.
     rm -rf "$fixed"
     mkdir -p "$fixed"
     git -C "$attack" -c safe.directory='*' archive --format=tar HEAD Dev/linux \
         | tar -x -C "$fixed"
     export NEST_LINUX_DIR="$fixed/Dev/linux"
-    echo "vm-build: case-fixed kernel -> $NEST_LINUX_DIR"
+    echo "vm-build: case-fixed kernel (git) -> $NEST_LINUX_DIR"
 fi
 
 mkdir -p "$out"

@@ -1,7 +1,7 @@
-# Nested upstream checkouts — large (the NestDFUAttack tree is ~2 GiB) and
-# each has its own .git. They are NOT part of the flake source; the builder
-# stages them and passes NEST_ATTACK_DIR=. See bin/macos/build.sh.
-/NestDFUAttack/
+# Vendored upstream checkouts that are not needed to build the flake outputs.
+# They are NOT flake inputs and not submodules; the builder stages them on demand
+# via NEST_ATTACK_DIR. (NestDFUAttack/ is a tracked, pinned submodule instead —
+# see .gitmodules.)
 /NoLongerEvil-SelfHosted/
 /NoLongerEvil-Thermostat/
 /NoLongerEvil-Hubitat/
