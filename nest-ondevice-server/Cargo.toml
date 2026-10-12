@@ -1,0 +1,21 @@
+[package]
+name = "nest-ondevice"
+version = "0.1.0"
+edition = "2021"
+description = "Compact Rust port of the NoLongerEvil Nest-protocol server, sized to run on the Nest thermostat itself"
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Footprint-first profile for the 64 MiB / Linux 2.6.37 target.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 0

@@ -1,0 +1,27 @@
+#!/bin/sh
+# /etc/init.d/nest-ondevice (installed into the thermostat rootfs by rootme)
+#
+# Starts the on-device Nest-protocol server. Written for the BusyBox ash on the
+# Nest rootfs (mtdblock7). The binary itself is installed at
+# /usr/bin/nest-ondevice; state lives under /media/data.
+DAEMON=/usr/bin/nest-ondevice
+PIDFILE=/var/run/nest-ondevice.pid
+LOGFILE=/tmp/nest-ondevice.log
+
+[ -x "$DAEMON" ] || exit 0
+
+if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+    exit 0
+fi
+
+DATA_DIR=/media/data/nest-ondevice
+mkdir -p "$DATA_DIR" 2>/dev/null || DATA_DIR=/tmp/nest-ondevice
+
+API_ORIGIN=${API_ORIGIN:-http://127.0.0.1:8000}
+SERVER_PORT=${SERVER_PORT:-8000}
+CONTROL_PORT=${CONTROL_PORT:-8082}
+export API_ORIGIN SERVER_PORT CONTROL_PORT DATA_DIR
+export REQUIRE_DEVICE_PAIRING=${REQUIRE_DEVICE_PAIRING:-false}
+
+"$DAEMON" >>"$LOGFILE" 2>&1 &
+echo $! > "$PIDFILE"

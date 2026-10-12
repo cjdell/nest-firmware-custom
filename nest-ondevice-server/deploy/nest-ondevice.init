@@ -1,0 +1,58 @@
+#!/bin/sh
+# /etc/init.d/nest-ondevice
+#
+# Start the on-device Nest-protocol server. Deploy the static binary to
+# /media/scratch/nest-ondevice and make this script executable. It is written
+# for the BusyBox ash on the Nest rootfs (mtdblock7).
+#
+# Point the thermostat at itself by setting cloudregisterurl in
+# /etc/nestlabs/client.config to http://127.0.0.1:8000/entry (the NLE settings
+# CGI does this), then restart the `nestlabs` service.
+
+DAEMON=/media/scratch/nest-ondevice
+PIDFILE=/var/run/nest-ondevice.pid
+LOGFILE=/media/log/nest-ondevice.log
+
+# Bind to the LAN IP so Hubitat can reach the control API. Set API_ORIGIN to the
+# same address so URLs handed to the thermostat are reachable.
+API_ORIGIN=${API_ORIGIN:-http://127.0.0.1:8000}
+export API_ORIGIN
+export SERVER_PORT=${SERVER_PORT:-8000}
+export CONTROL_PORT=${CONTROL_PORT:-8082}
+export DATA_DIR=${DATA_DIR:-/media/data/nest-ondevice}
+export SUSPEND_TIME_MAX=${SUSPEND_TIME_MAX:-300}
+export DEFER_DEVICE_WINDOW=${DEFER_DEVICE_WINDOW:-15}
+export REQUIRE_DEVICE_PAIRING=${REQUIRE_DEVICE_PAIRING:-false}
+
+start() {
+    [ -x "$DAEMON" ] || { echo "missing $DAEMON"; exit 1; }
+    mkdir -p "$DATA_DIR"
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+        echo "nest-ondevice already running"
+        return 0
+    fi
+    echo "starting nest-ondevice"
+    "$DAEMON" >>"$LOGFILE" 2>&1 &
+    echo $! > "$PIDFILE"
+}
+
+stop() {
+    [ -f "$PIDFILE" ] || return 0
+    echo "stopping nest-ondevice"
+    kill "$(cat "$PIDFILE")" 2>/dev/null
+    rm -f "$PIDFILE"
+}
+
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    restart) stop; sleep 1; start ;;
+    status)
+        if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+            echo "running (pid $(cat "$PIDFILE"))"
+        else
+            echo "stopped"
+        fi
+        ;;
+    *) echo "usage: $0 {start|stop|restart|status}"; exit 1 ;;
+esac
