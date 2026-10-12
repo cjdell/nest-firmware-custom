@@ -22,18 +22,21 @@ the 2008 ARM cross toolchain — so `bin/macos/build.sh` runs the build in an
 [Apple-container](https://github.com/apple/container) NixOS VM. Its `/nix`
 persists between runs, so only changed derivations rebuild.
 
-## The 2008 toolchain is i686 — so it runs under qemu-i386
+## The 2008 toolchain: native on x86_64, qemu-i386 elsewhere
 
-`NestDFUAttack/Dev/toolchain/arm-2008q3` is a 32-bit **x86** (i686) CodeSourcery
-toolchain. That no longer runs on modern machines: Apple-container/Rosetta
-executes `x86_64` but **not** `i686` (`Exec format error`), and an `amd64`
-container has no `ld-linux.so.2`. So the toolchain is executed under
-`qemu-i386`, with the i386 glibc/zlib/ncurses it links against coming from
-`pkgsCross.gnu32`.
+`NestDFUAttack/Dev/toolchain/arm-2008q3` is a 32-bit **i686** CodeSourcery
+toolchain (ELF interpreter `/lib/ld-linux.so.2`). `firmware/default.nix` builds
+it two ways:
 
-`firmware/default.nix` copies the toolchain into a writable tree and replaces
-every program the driver may exec (`gcc`, `cc1`, `collect2`, `as`, `ld`, …) with
-a native wrapper:
+* **x86_64 Linux — the fast path.** The host kernel has `CONFIG_IA32_EMULATION`
+on, so i686 code runs natively. The derivation copies the toolchain into a
+writable tree and rewrites every i686 ELF's interpreter + RPATH to the store's
+i386 loader/libs with `patchelf`, then runs it directly. No emulation and no
+wrappers: the full kernel build takes ~35 s.
+* **Anywhere else** (aarch64-linux, macOS) it falls back to `qemu-i386` user
+emulation, with the i386 glibc/zlib/ncurses it links against coming from
+`pkgsCross.gnu32`. Here every program the driver may exec (`gcc`, `cc1`,
+`collect2`, `as`, `ld`, …) is replaced in place by a native wrapper:
 
 ```sh
 #!/nix/store/…-bash/bin/bash
@@ -70,7 +73,9 @@ either way the build sees the same content.
 no root/`mknod` is needed (Nix builds are unprivileged and cannot recreate the
 device nodes). It:
 
-1. copies every existing entry byte-for-byte,
+1. copies every existing entry byte-for-byte, including each device node's
+   major/minor (they used to be zeroed — masked on-device by devtmpfs, but
+   fatal to an initramfs that relies on its static `/dev`),
 2. adds `/usr/bin/nest-ondevice` and `/etc/init.d/nest-ondevice`,
 3. patches `/etc/init.d/rootme` — the script that installs persistent files to
    `mtdblock7` — **before** it runs `umount /tmp/1`, so the server is copied to
@@ -82,6 +87,42 @@ patched cpio, and `mkimage` produces the `uImage`.
 At runtime `nest-ondevice` listens on the device port (default 8000) and the
 control port (default 8082) with state under `/media/data/nest-ondevice`; see
 `../nest-ondevice-server/README.md`.
+
+## QEMU smoke test (no thermostat needed)
+
+`packages.<system>.nestQemuKernel` builds the same 2.6.37 kernel tree + the same
+injected cpio for **ARM RealView PB-A8** (Cortex-A8/ARMv7), a board
+`qemu-system-arm` emulates, and `firmware/qemu-smoke.sh` boots it and asserts the
+server answers:
+
+```sh
+bash firmware/qemu-smoke.sh
+```
+
+The boot is the real thing (same kernel, same rootfs, the static musl server),
+with a qemu-only `/qemu-init` used as `rdinit` that skips the hardware-only
+`rcS` (mtdblock7/tiwlan/`rootme`'s reboot). It prints the guest's
+`/proc/version`, starts the server, self-tests over loopback with busybox `nc`,
+and the script also hits `:18000`/`:18082` through qemu's user-net port
+forwards.
+
+Three RealView/PB-A8 traps are baked into `firmware/qemu.nix`:
+
+* **`REALVIEW_HIGH_PHYS_OFFSET`.** `realview_defconfig` enables
+  `MACH_REALVIEW_PB1176`, which makes `REALVIEW_HIGH_PHYS_OFFSET` (`depends on
+  MMU && !MACH_REALVIEW_PB1176`) invisible. Without it `zreladdr` is
+  `0x00008000`, but qemu's PB-A8 has RAM at `0x70000000`, so the decompressed
+  kernel is jumped into unmapped memory and runs away. The build disables the
+  PB1176/EB/PB11MP boards and re-enables the option.
+* **`-m 512M`.** The kernel's `realview_fixup` hardcodes a 512 MB bank at
+  `0x70000000`; booting with less hangs in `paging_init()`. Give qemu 512 MB.
+* **NIC.** qemu's PB-A8 only models a **lan9118** (`smsc911x` driver), while the
+  2.6.37 board file instantiates the `smc91x` AMBA device. Point `-nic` at
+  `model=lan9118`; `CONFIG_SMSC911X` is enabled so `eth0` comes up.
+
+The rootfs's `/usr/bin/curl` needs `libcurl.so.4` (not in the initramfs), so the
+in-guest self-test speaks HTTP/1.0 over busybox `nc`. Interfaces come up with
+`/sbin/ifconfig` — there is no `/bin/ifconfig` on this rootfs.
 
 ## Building
 

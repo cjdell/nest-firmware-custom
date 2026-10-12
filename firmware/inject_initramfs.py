@@ -30,23 +30,23 @@ def parse(data):
         i = (i + 3) & ~3
         body = data[i : i + filesize]
         i = (i + filesize + 3) & ~3
-        entries.append([ino, mode, uid, gid, nlink, mtime, name, body])
+        entries.append([ino, mode, uid, gid, nlink, mtime, name, body, _rmaj, _rmin])
         if name == "TRAILER!!!":
             break
     return entries
 
 
-def header(ino, mode, uid, gid, nlink, mtime, name, size):
+def header(ino, mode, uid, gid, nlink, mtime, name, size, rmaj=0, rmin=0):
     name_b = name.encode("utf-8", "surrogateescape") + b"\0"
-    fields = [ino, mode, uid, gid, nlink, mtime, size, 0, 0, 0, 0, len(name_b), 0]
+    fields = [ino, mode, uid, gid, nlink, mtime, size, 0, 0, rmaj, rmin, len(name_b), 0]
     out = MAGIC + b"".join(b"%08X" % (v & 0xFFFFFFFF) for v in fields) + name_b
     out += b"\0" * ((4 - (len(out) % 4)) % 4)
     return out
 
 
 def emit(entry):
-    ino, mode, uid, gid, nlink, mtime, name, body = entry
-    out = header(ino, mode, uid, gid, nlink, mtime, name, len(body))
+    ino, mode, uid, gid, nlink, mtime, name, body, rmaj, rmin = entry
+    out = header(ino, mode, uid, gid, nlink, mtime, name, len(body), rmaj, rmin)
     out += body
     out += b"\0" * ((4 - (len(body) % 4)) % 4)
     return out
@@ -112,9 +112,9 @@ def main():
             out.append(emit(e))
         elif name == "TRAILER!!!":
             # add our files just before the trailer
-            out.append(emit([next_ino, 0o100755, 0, 0, 1, 0, "usr/bin/nest-ondevice", binary]))
+            out.append(emit([next_ino, 0o100755, 0, 0, 1, 0, "usr/bin/nest-ondevice", binary, 0, 0]))
             next_ino += 1
-            out.append(emit([next_ino, 0o100755, 0, 0, 1, 0, "etc/init.d/nest-ondevice", init]))
+            out.append(emit([next_ino, 0o100755, 0, 0, 1, 0, "etc/init.d/nest-ondevice", init, 0, 0]))
             next_ino += 1
             out.append(emit(e))
         else:

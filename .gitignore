@@ -13,3 +13,7 @@
 /nest-ondevice-server/target/
 /.direnv/
 /firmware-out/
+
+# Python bytecode from the firmware helper scripts
+__pycache__/
+*.pyc

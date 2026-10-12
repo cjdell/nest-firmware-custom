@@ -60,13 +60,36 @@ else
       add ${i386Pkgs.stdenv.cc.cc.lib}
     '';
 
-    # The 2008 toolchain is i686. Copy it into a writable tree and replace
-    # every host executable the driver/collect2 may exec with a native wrapper
-    # that runs the real i686 binary under qemu-i386. Wrapping in place means
-    # gcc finds cc1/collect2/as/ld at their normal locations, so no
-    # COMPILER_PATH/-B black magic is needed (and the native host compiler is
-    # left untouched).
-    crossToolchain = pkgs.runCommand "nest-cross-toolchain" { } ''
+    # The 2008 toolchain is i686. On an x86_64 Linux host the kernel runs
+    # IA32 binaries natively (CONFIG_IA32_EMULATION=y on any modern distro),
+    # so we only need to rewrite each i686 ELF's interpreter/RPATH to the
+    # store's i386 loader + libs and run it directly. This is dramatically
+    # faster than qemu-i386 user emulation and needs no wrappers: gcc finds
+    # cc1/collect2/as/ld at their normal relative locations.
+    nativeToolchain = pkgs.runCommand "nest-cross-toolchain-native" {
+      nativeBuildInputs = [ pkgs.patchelf ];
+    } ''
+      mkdir -p $out
+      cp -r ${attack.toolchain}/. $out/
+      chmod -R u+w $out
+      find $out -type f -print0 | while IFS= read -r -d "" f; do
+        interp=$(patchelf --print-interpreter "$f" 2>/dev/null) || continue
+        case "$interp" in
+          */ld-linux.so.2)
+            patchelf --set-interpreter ${i386Root}/lib/ld-linux.so.2 \
+                     --set-rpath ${i386Root}/lib "$f"
+            ;;
+        esac
+      done
+    '';
+
+    # Portable fallback (aarch64-linux / darwin hosts): copy the toolchain into
+    # a writable tree and replace every host executable the driver/collect2 may
+    # exec with a native wrapper that runs the real i686 binary under qemu-i386.
+    # Wrapping in place means gcc finds cc1/collect2/as/ld at their normal
+    # locations, so no COMPILER_PATH/-B black magic is needed (and the native
+    # host compiler is left untouched).
+    qemuToolchain = pkgs.runCommand "nest-cross-toolchain" { } ''
       mkdir -p $out
       cp -r ${attack.toolchain}/. $out/
       chmod -R u+w $out
@@ -92,6 +115,12 @@ EOF
         ln -sf "$out/bin/arm-none-linux-gnueabi-$t" "$out/libexec/$t"
       done
     '';
+
+    crossToolchain =
+      if pkgs.stdenv.hostPlatform.isLinux && pkgs.stdenv.hostPlatform.isx86_64 then
+        nativeToolchain
+      else
+        qemuToolchain;
 
     # Base initramfs + the server binary + its init script.
     initramfs = pkgs.runCommand "nest-initramfs" {
@@ -163,8 +192,14 @@ EOF
         license = lib.licenses.gpl2Only;
       };
     };
+    # QEMU smoke-test image (real kernel tree + injected cpio, emulated board).
+    # Kept in its own file so the shipped firmware path above is untouched.
+    qemuPackages = import ./qemu.nix {
+      inherit pkgs lib nest-ondevice crossToolchain attack initramfs;
+    };
   in
   {
-    inherit initramfs firmware;
+    inherit initramfs firmware crossToolchain;
     default = firmware;
   }
+  // qemuPackages

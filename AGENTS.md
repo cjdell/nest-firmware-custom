@@ -48,6 +48,11 @@ export NEST_ATTACK_DIR=$PWD/NestDFUAttack
 nix build --impure .#firmware            # -> uImage
 nix build --impure .#initramfs           # -> initramfs.cpio
 
+# QEMU smoke test of the firmware (same kernel tree + injected rootfs on an
+# emulated ARM RealView PB-A8; no thermostat needed) — see firmware/README.md
+nix build --impure .#nestQemuKernel
+bash firmware/qemu-smoke.sh
+
 # On a Mac: Apple-container NixOS VM drives the Linux build
 bash bin/macos/build.sh start firmware
 bash bin/macos/build.sh wait  firmware   # rc 0 done, 1 failed, 2 still running
@@ -65,14 +70,14 @@ SERVER_PORT=18000 CONTROL_PORT=18082 API_ORIGIN=http://127.0.0.1:18000 \
 python3 nest-ondevice-server/test_smoke.py
 ```
 
-**Verified build (2026-10-12).** Native x86_64-linux, `nix build --impure
-.#firmware` (`zen3-nixos`) →
-`/nix/store/3pg38yhqikxaqvsknbfb8mwa6y8ydl0b-nest-firmware-1.0.0`,
-`uImage` sha256 `6a6f450a0ef2a1e7b875f4eab5d4c9a803cd5730e6f671383abebf739b2948a4`,
-7,232,360 bytes, kernel ≈ **3m00s**. The earlier aarch64-linux Apple-container
-build (`/nix/store/djmp6d5mi02b4gkkw0kdd8s6g236mq31-nest-firmware-1.0.0`,
-sha256 `2f0a61ca…`, 7,231,740 bytes) differs only in the embedded build
-environment/compression. Re-running is cached (same store path, no rebuild).
+**Verified build (2026-10-12).** Native x86_64-linux (`zen3-nixos`), `nix
+build --impure .#firmware` →
+`/nix/store/7jlzd05jfh3fy5w8w3zdb0kwpdkdqq78-nest-firmware-1.0.0`,
+`uImage` sha256 `5d4a35b674da5c4b85be2623aa20aa0e3c628b33945a84e2a486c07013e5cf72`,
+7,230,916 bytes, ~**35 s** with the native i686 toolchain (was ~3m00s under
+qemu-i386). The hash changed from the earlier `6a6f450a…` image because the
+device major/minor fix alters the embedded cpio. Re-running is cached (same
+store path, no rebuild).
 
 Decompress-and-grep check that the server is *inside* the image:
 
@@ -88,12 +93,14 @@ PY
 
 ## Traps already paid for (read before changing the build)
 
-1. **i686 does not run under Apple-container/Rosetta.** Verified:
-   `container run --rosetta --platform linux/amd64 … /path/to/i686-binary`
-   → `Exec format error`; an `amd64` image also has no `ld-linux.so.2`. OrbStack
-   Docker is not a workaround. **Fix:** run the toolchain under **`qemu-i386`**
+1. **The 2008 toolchain is i686.** On **x86_64 Linux** the kernel has
+   `CONFIG_IA32_EMULATION`, so `firmware/default.nix` rewrites every i686 ELF's
+   interpreter/RPATH to the store's i386 loader (`patchelf`) and runs it
+   **natively** — the full kernel build is ~35 s. Everywhere else
+   (aarch64-linux, macOS — Rosetta is x86_64-only → `Exec format error`, and an
+   `amd64` container has no `ld-linux.so.2`) it falls back to **`qemu-i386`**
    with an i386 sysroot (`pkgsCross.gnu32` glibc/zlib/ncurses →
-   `${qemu}/bin/qemu-i386 -L <root>`), in `firmware/default.nix`.
+   `${qemu}/bin/qemu-i386 -L <root>`).
 
 2. **Wrap the toolchain *in place*; never set `COMPILER_PATH` globally.**
    A global `COMPILER_PATH` also hijacks the **native host** compiler's `cc1`
@@ -131,6 +138,10 @@ PY
 6. **Nix builds are unprivileged** and cannot `mknod`. So
    `inject_initramfs.py` edits the cpio at the **archive level** (copy entries
    verbatim) rather than extracting `/dev/*`. Do not switch to extract+repack.
+   **Preserve the device major/minor**: `header()` used to emit `0,0` for every
+   entry, silently zeroing every `/dev` node. That is masked on-device by
+   devtmpfs but fatal to an initramfs with no devtmpfs (breaks `/dev/console`).
+   `parse()`/`emit()` now carry `rmaj`/`rmin` through.
 
 7. **`nixpkgs-unstable` dropped `x86_64-darwin`** (26.11). `flake.nix`'s
    `systems` therefore omits it; `--all-systems` fails on it, not on us.

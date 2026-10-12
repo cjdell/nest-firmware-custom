@@ -18,6 +18,8 @@ The protocol research and the design rationale live in
 nix build .#nest-ondevice            # static armv7-soft-float-musl server (any system)
 nix build --impure .#firmware        # uImage with the server embedded   (Linux only)
 nix build --impure .#initramfs       # the intermediate patched cpio       (Linux only)
+nix build --impure .#nestQemuKernel  # same kernel+rootfs for qemu-system-arm
+bash firmware/qemu-smoke.sh          # boot it under qemu and assert HTTP works
 ```
 
 `.#firmware` needs the vendored GTVHacker checkout for the kernel, base
