@@ -15,9 +15,9 @@ The protocol research and the design rationale live in
 ## Flake outputs
 
 ```sh
-nix build .#nest-ondevice   # static armv7-soft-float-musl server (any system)
-nix build .#firmware        # uImage with the server embedded   (Linux only)
-nix build .#initramfs       # the intermediate patched cpio       (Linux only)
+nix build .#nest-ondevice            # static armv7-soft-float-musl server (any system)
+nix build --impure .#firmware        # uImage with the server embedded   (Linux only)
+nix build --impure .#initramfs       # the intermediate patched cpio       (Linux only)
 ```
 
 `.#firmware` needs the vendored GTVHacker checkout for the kernel, base
@@ -27,10 +27,31 @@ to an upstream commit:
 ```sh
 git submodule update --init NestDFUAttack   # fresh clone only
 export NEST_ATTACK_DIR=$PWD/NestDFUAttack
-nix build .#firmware
+nix build --impure .#firmware
 ```
 
-## Building on a Mac
+`--impure` is required: `firmware/default.nix` reads `NEST_ATTACK_DIR` with
+`builtins.getEnv`, which flakes only honour under impure evaluation.
+
+## Building on Linux (primary)
+
+On a case-sensitive Linux filesystem the submodule checks out cleanly — both
+`xt_HL.c` and `xt_hl.c` exist — so nothing special is needed beyond Nix with
+flakes enabled:
+
+```sh
+git submodule update --init NestDFUAttack   # fresh clone only
+NEST_ATTACK_DIR=$PWD/NestDFUAttack nix build --impure .#firmware
+```
+
+For the artifact + manifest + checksum workflow, `bin/macos/vm-build.sh` also
+runs natively on Linux (despite the directory name):
+
+```sh
+NEST_ATTACK_DIR=$PWD/NestDFUAttack ./bin/macos/vm-build.sh firmware
+```
+
+## Building on a Mac (alternative)
 
 `nix` on macOS cannot run a Linux builder, and the firmware build needs Linux
 (`make`, `perl`, and an i686 cross toolchain under `qemu-i386`). `bin/macos/build.sh`
@@ -43,9 +64,8 @@ bash bin/macos/build.sh status            # artifacts + checksums
 ```
 
 Artifacts (`uImage`, `nest-ondevice`, `initramfs.cpio`, manifests, checksums)
-land in `~/.cache/nest-macos/out/`.
-
-On a Linux host, `bin/macos/vm-build.sh` is the same build without the VM.
+land in `~/.cache/nest-macos/out/`. The macOS path re-materialises the kernel
+case-exactly (see `firmware/README.md`); Linux never needs that.
 
 ## Repository layout
 
@@ -66,5 +86,6 @@ docs/nest-ondevice-protocol-research.md
 `NestDFUAttack/` is a **submodule** pinned to an upstream commit and tracked
 via `.gitmodules` (run `git submodule update --init` after cloning). The other
 upstream trees (`NoLongerEvil-*`, `hubitatcontrol/`) are git-ignored sibling
-checkouts used only as references; none are flake inputs. The builder stages
-`NestDFUAttack/` into the Linux VM as `NEST_ATTACK_DIR`.
+checkouts used only as references; none are flake inputs. The build reads
+`NestDFUAttack/` via `NEST_ATTACK_DIR` (directly on Linux, staged into the VM
+on macOS).

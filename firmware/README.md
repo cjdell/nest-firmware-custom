@@ -97,11 +97,12 @@ bash bin/macos/build.sh status
 Artifacts land in `~/.cache/nest-macos/out/` together with a `.manifest`
 (source revision, nix/VM versions, store paths) and `.sha256`.
 
-On any Linux host with Nix:
+On any Linux host with Nix (the clean path — no VM and no case workaround):
 
 ```sh
+NEST_ATTACK_DIR=$PWD/NestDFUAttack nix build --impure .#firmware
+# or the artifact + manifest wrapper:
 NEST_ATTACK_DIR=$PWD/NestDFUAttack ./bin/macos/vm-build.sh firmware
-nix build .#firmware          # from an aarch64-linux / x86_64-linux host
 ```
 
 `NEST_ATTACK_DIR` must point at the vendored GTVHacker checkout (the `NestDFUAttack`

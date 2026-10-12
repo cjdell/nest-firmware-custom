@@ -38,14 +38,15 @@ then `docs/nest-ondevice-protocol-research.md` for the protocol rationale.
 ## Build & verify
 
 ```sh
-# Server only (works on the Mac directly; rust-lld, no ARM linker needed)
+# Server only (any system; rust-lld, no ARM linker needed)
 nix build .#nest-ondevice
 
-# Firmware image (needs Linux + the vendored tree)
+# Firmware image (Linux; --impure is required because default.nix reads
+# NEST_ATTACK_DIR via builtins.getEnv and flakes default to pure eval)
 git submodule update --init NestDFUAttack   # fresh clone only
 export NEST_ATTACK_DIR=$PWD/NestDFUAttack
-nix build .#firmware            # -> uImage
-nix build .#initramfs           # -> initramfs.cpio
+nix build --impure .#firmware            # -> uImage
+nix build --impure .#initramfs           # -> initramfs.cpio
 
 # On a Mac: Apple-container NixOS VM drives the Linux build
 bash bin/macos/build.sh start firmware
@@ -64,11 +65,14 @@ SERVER_PORT=18000 CONTROL_PORT=18082 API_ORIGIN=http://127.0.0.1:18000 \
 python3 nest-ondevice-server/test_smoke.py
 ```
 
-**Verified build (2026-10-12):** `nix build .#firmware` →
-`/nix/store/djmp6d5mi02b4gkkw0kdd8s6g236mq31-nest-firmware-1.0.0`,
-`uImage` sha256 `2f0a61ca5fd093fe06f87d4e4770dd688a4cc13cb34d9bd18610a5db3fec026e`,
-7,231,740 bytes. Kernel build ≈ **3m40s under qemu-i386**. Re-running the build
-is cached (same store path, no rebuild).
+**Verified build (2026-10-12).** Native x86_64-linux, `nix build --impure
+.#firmware` (`zen3-nixos`) →
+`/nix/store/3pg38yhqikxaqvsknbfb8mwa6y8ydl0b-nest-firmware-1.0.0`,
+`uImage` sha256 `6a6f450a0ef2a1e7b875f4eab5d4c9a803cd5730e6f671383abebf739b2948a4`,
+7,232,360 bytes, kernel ≈ **3m00s**. The earlier aarch64-linux Apple-container
+build (`/nix/store/djmp6d5mi02b4gkkw0kdd8s6g236mq31-nest-firmware-1.0.0`,
+sha256 `2f0a61ca…`, 7,231,740 bytes) differs only in the embedded build
+environment/compression. Re-running is cached (same store path, no rebuild).
 
 Decompress-and-grep check that the server is *inside* the image:
 
