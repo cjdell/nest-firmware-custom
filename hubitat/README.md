@@ -16,21 +16,31 @@ and control are reproducible.
 | Driver (thermostat) | "NoLongerEvil Thermostat", id **940** |
 | App (connect) | "NoLongerEvil Connect", app id **210**, installed instance **28** |
 
-## Required driver fix (upstream bug)
+## Required driver fixes (upstream bugs)
 
-`drivers/nolongerevil-thermostat.groovy:391` wraps a Groovy GString in double
-quotes, so `$"` is an illegal interpolation and the driver will not compile:
+The upstream driver has two problems; `nolongerevil-thermostat.patch` fixes both.
 
-```groovy
-return url.toString().replaceAll("/+$", "")   // BROKEN
-return url.toString().replaceAll('/+$', "")   // FIXED
-```
+1. **Illegal GString** — `drivers/nolongerevil-thermostat.groovy:391` wraps a
+   Groovy GString in double quotes, so `$"` is an illegal interpolation and the
+   driver will not compile:
 
-Apply `nolongerevil-thermostat-gstring.patch` to a `NoLongerEvil-Hubitat/`
-checkout (that tree is a git-ignored sibling — AGENTS.md trap 10):
+   ```groovy
+   return url.toString().replaceAll("/+$", "")   // BROKEN
+   return url.toString().replaceAll('/+$', "")   // FIXED
+   ```
+
+2. **Heat-only units never publish `coolingSetpoint`** — the Hubitat Google Home
+   app requires every attribute of the `Thermostat` capability, so a heat-only
+   thermostat that only ever sets `heatingSetpoint` is marked *not compatible*
+   (`googleHomeSupported=false`) and silently dropped from the Google Home device
+   picker (AGENTS.md trap 18). The patch also emits `coolingSetpoint` in the
+   non-cool branch.
+
+Apply it to a `NoLongerEvil-Hubitat/` checkout (git-ignored sibling — AGENTS.md
+trap 10):
 
 ```sh
-git -C NoLongerEvil-Hubitat apply ../hubitat/nolongerevil-thermostat-gstring.patch
+git -C NoLongerEvil-Hubitat apply ../hubitat/nolongerevil-thermostat.patch
 ```
 
 ## Install/update code through the hub API
@@ -84,6 +94,22 @@ curl -s -X POST http://192.168.1.3/device/runmethod -H 'Content-Type: applicatio
 ```
 
 Read back: `GET /device/eventsJson/<id>` (event array, newest last).
+
+## Google Home
+
+The hub's built-in **Google Home** app (app type 78, instance 3) is already
+OAuth-linked to a Google account. It exposes only devices the hub reports as
+`googleHomeSupported=true`. That flag needs **all attributes of the device's
+capabilities to be populated**; for a `Thermostat` that includes
+`coolingSetpoint`. A heat-only thermostat that never sets `coolingSetpoint` is
+rejected and silently removed from the device picker — which is exactly what the
+driver patch above fixes.
+
+To expose the thermostat: **Hubitat → Apps → Google Home → tick the thermostat →
+Update → Done.** It then appears in the Google Home / Assistant app (the account
+link already exists; no re-link needed). `googleHomeSupported` is returned by
+`GET /device/fullJson/<id>` — re-check it *after* a driver change takes effect
+(the device must re-poll, or be re-saved, before the flag recomputes).
 
 ## Rename / edit a device (undocumented)
 

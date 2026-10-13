@@ -138,8 +138,10 @@ instance 28) and thermostat driver (id 940) are installed, and the thermostat
 device (id 16, DNI `nolongerevil-02AA01AC2614065C`, label `Hallway Thermostat`)
 is paired to the on-device server at `http://192.168.1.2:8082`. **Bidirectional
 control is proven**: `setHeatingSetpoint` from the hub moved the Nest's
-`target_temperature`. The app/driver source ships with a one-line Groovy GString
-bug (driver line 391). Full install, endpoint, rename and network procedures are
+`target_temperature`. The driver needed two upstream fixes (an illegal Groovy
+GString; and heat-only units must also publish `coolingSetpoint` or the Hubitat
+Google Home app rejects them — trap 18). Full install, endpoint, rename, Google
+Home and network procedures are
 in **`hubitat/README.md`**.
 
 ## Traps already paid for (read before changing the build)
@@ -295,6 +297,22 @@ in **`hubitat/README.md`**.
     (endpoint in `hubitat/README.md`). The hub then owned `.3` and the Watch
     moved off to its reserved `.10`. The router reservation stays and now agrees
     with the hub's static IP. Current map: Nest `.2`, Hubitat `.3`, Watch `.10`.
+
+18. **A heat-only thermostat is invisible to Google Home until it publishes
+    `coolingSetpoint`.** The Hubitat Google Home app reports a device as
+    `googleHomeSupported` only when **every attribute of its capabilities is
+    populated**; `capability "Thermostat"` includes `coolingSetpoint`, so a
+    heat-only driver that only ever calls
+    `sendEvent(name: "heatingSetpoint", …)` is reported *not compatible* and is
+    **silently dropped from the Google Home device picker** (submitting it in a
+    save does nothing). The built-in *Virtual Thermostat* is supported because it
+    sets both setpoints; a copy that omits `coolingSetpoint` flips back to
+    `googleHomeSupported=false`. Note a *custom* driver is fine (a hand-written
+    user switch/thermostat with its attributes populated is accepted) — it is the
+    missing attribute, not the user-driver-ness, that matters. Fix: also emit
+    `coolingSetpoint` in the non-cool branch (the value is cosmetic — the Nest
+    cannot cool). See `hubitat/README.md` § Google Home and
+    `hubitat/nolongerevil-thermostat.patch`.
 
 ## Layout
 

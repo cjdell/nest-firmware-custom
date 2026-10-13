@@ -1,0 +1,30 @@
+--- a/drivers/nolongerevil-thermostat.groovy
++++ b/drivers/nolongerevil-thermostat.groovy
+@@ -186,11 +186,15 @@
+     } else {
+         def target = asNumber(json.target_temperature)
+         if (target != null) {
+-            sendEvent(name: "thermostatSetpoint", value: round1(convertFromCelsius(target, scale)), unit: "°${scale}")
++            def t = round1(convertFromCelsius(target, scale))
++            sendEvent(name: "thermostatSetpoint", value: t, unit: "°${scale}")
+             if (mode == "cool") {
+-                sendEvent(name: "coolingSetpoint", value: round1(convertFromCelsius(target, scale)), unit: "°${scale}")
++                sendEvent(name: "coolingSetpoint", value: t, unit: "°${scale}")
+             } else {
+-                sendEvent(name: "heatingSetpoint", value: round1(convertFromCelsius(target, scale)), unit: "°${scale}")
++                sendEvent(name: "heatingSetpoint", value: t, unit: "°${scale}")
++                // Heat-only units still must publish coolingSetpoint or the Hubitat
++                // Google Home app deems the Thermostat capability incomplete (trap 18).
++                sendEvent(name: "coolingSetpoint", value: t, unit: "°${scale}")
+             }
+         }
+     }
+@@ -388,7 +392,7 @@
+ private String effectiveServerUrl() {
+     def url = settings.serverUrl ?: device?.getDataValue("serverUrl")
+     if (!url) return null
+-    return url.toString().replaceAll("/+$", "")
++    return url.toString().replaceAll('/+$', "")
+ }
+ 
+ private String effectiveSerial() {
