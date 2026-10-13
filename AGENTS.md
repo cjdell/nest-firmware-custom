@@ -13,8 +13,9 @@ BootROM DFU path. `NestDFUAttack/` is pinned as a git submodule at upstream
 because a macOS checkout collapses its case-only paths). The build is green, the
 image embeds the server, and the whole path (flash -> first-boot install -> app
 talks to `127.0.0.1:8000` -> Hubitat can reach `:8082`) has been validated on
-hardware. Three on-hardware bugs were found and fixed (traps 11-13); the display
-still deep-sleeps (trap 14) until suspend is disabled.
+hardware. Four on-hardware bugs/behaviours were found and fixed (traps 11-14):
+suspend is now disabled persistently, so the LAN server stays reachable (remote
+reboot caveat: trap 15).
 
 Read this file, then `README.md`, then `firmware/README.md` if building images,
 then `docs/nest-ondevice-protocol-research.md` for the protocol rationale.
@@ -93,6 +94,38 @@ out=lzma.decompress(d[i:], format=lzma.FORMAT_ALONE)
 print(len(out), b'usr/bin/nest-ondevice' in out, b'nest-ondevice (injected' in out)
 PY
 ```
+
+## On-device operations (SSH, reboot)
+
+The unit (currently `192.168.1.143`, DHCP — re-check) accepts **password** SSH as
+`root` only, and has **no `scp`/`sftp`** — stream files over stdin. The password
+is a diagnostic one baked into `firmware/inject_initramfs.py`; remove it before a
+"production" flash.
+
+```sh
+SP=$(nix build --print-out-paths nixpkgs#sshpass)/bin/sshpass
+nssh() { $SP -p nestpass ssh -o StrictHostKeyChecking=no \
+    -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+    root@192.168.1.143 "$@"; }
+cat local.bin | nssh 'cat > /usr/bin/x && chmod 755 /usr/bin/x'
+```
+
+If SSH/HTTP times out the display is asleep — **touch the screen to wake it**,
+then retry. (Suspend is now disabled, trap 14, so this should not recur.)
+
+### Rebooting remotely (read trap 15 first)
+
+```sh
+nssh '/sbin/reboot'      # graceful: busybox init runs /etc/init.d/rcH
+nssh '/sbin/reboot -f'   # force: sync() then reboot(2), skips rcH — escape hatch
+```
+
+Confirm the reboot by watching ICMP drop then return (boot is ~40 s) and
+checking `uptime` is ~0 min. A still-answering `ping` does **not** mean "not
+rebooting": `rcH` can sit in a retry backoff for ~6 minutes while the network is
+still up (trap 15). If a graceful reboot stalls, use `/sbin/reboot -f`, or kill
+the hung `/bin/sleep` child of the running `/etc/init.d/nlsleep stop` so its
+backoff loop breaks and `rcH` continues.
 
 ## Traps already paid for (read before changing the build)
 
@@ -187,14 +220,38 @@ PY
     char-safe `truncate()` helper, and the release profile switched to
     `panic = "unwind"` so one bad request can no longer take down the process.
 
-14. **The display deep-sleeps; a persistent LAN server needs that disabled.**
+14. **The display deep-slept; a persistent LAN server needed that disabled.**
     `nlsleepd` (`/etc/init.d/nlsleep`, supervised by
-    `/etc/monit.d/nlscpm.monitrc`) sets
+    `/etc/monit.d/nlscpm.monitrc`) set
     `/sys/kernel/debug/pm_debug/{enable_off_mode,sleep_while_idle,voltage_off_while_idle}=1`;
-    the kernel then suspends to RAM when idle, the Wi-Fi radio goes off, and the
-    server is only reachable while the device is awake (`PM: Entering mem sleep`
-    in dmesg). Writing those knobs to `0` stops it (verified live, not yet
-    persistent). See the handover for the full procedure.
+    the kernel then suspended to RAM when idle, the Wi-Fi radio went off, and the
+    server was only reachable while the device was awake (`PM: Entering mem sleep`
+    in dmesg). **Fixed and persisted on the flash root** (`/dev/root`, jffs2 —
+    edits there survive reboot, no reflash needed):
+    * `#DISABLED` the `nlsleepd` `check process` lines in
+      `/etc/monit.d/nlscpm.monitrc` (kept `nlshutdownd`), then `monit reload`;
+    * `#DISABLED` `${INITDIR}/nlsleep start` in `/etc/init.d/rcS`;
+    * added **`/etc/init.d/nosleep`** (idempotent; mounts debugfs if needed) which
+      writes the three knobs to `0`, called from `rcS` just before
+      `nest-ondevice start`;
+    then `sync`. Verified across a reboot: the knobs read `0/0/0`, `nlsleepd` is
+    not running and is gone from `monit summary`, and `dmesg | grep -ci 'mem
+    sleep'` is `0`. Removing `nlsleepd` from monit breaks the shutdown stop path
+    — see trap 15.
+
+15. **A "graceful" `/sbin/reboot` can hang ~6 minutes in `rcH`.** busybox init
+    runs `::shutdown:/etc/init.d/rcH`, which calls `${INITDIR}/nlsleep stop`.
+    That goes through `monit_service_action stop nlsleepd` in `/etc/init.d/dm`,
+    whose retry loop sleeps `1,3,9,27,81,243` s (~364 s total) whenever
+    `monit stop` returns non-zero. Once `nlsleepd` was removed from
+    `/etc/monit.d/nlscpm.monitrc` (trap 14), `monit stop nlsleepd` *always*
+    failed, so every shutdown stalled ~6 min with the network still up — it
+    looked like "reboot does nothing". **Fixed** in `/etc/init.d/nlsleep`'s
+    `stop)` case: if `pidof nlsleepd`, call `stop_nlsleepd` (direct KILL) instead
+    of monit. Escape hatches for a stalled shutdown on a pre-fix image: `kill`
+    the `/bin/sleep` child of the running `/etc/init.d/nlsleep stop` (the loop
+    then hits its `retry == 5` break and `rcH` continues), or
+    `ssh root@… /sbin/reboot -f` (sync + `reboot(2)`, skips `rcH`).
 
 ## Layout
 
@@ -226,9 +283,6 @@ docs/nest-ondevice-protocol-research.md
 
 ## Next steps (not done)
 
-* **Disable suspend** so the on-device server is always reachable. Stop and
-  unwire `nlsleepd`, zero the `pm_debug` knobs, and persist it across reboot —
-  see the handover for the exact procedure and acceptance test.
 * **Hubitat** — install the NoLongerEvil Connect app + driver on
   `192.168.1.29` and point it at `http://192.168.1.143:8082` (mDNS is not
   advertised; the hub can subnet-scan `:8082` or you can enter the IP). See
