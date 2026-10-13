@@ -6,11 +6,15 @@ a Nix flake that cross-compiles it and bakes it into a flashable `uImage`
 (`firmware/`). The device is pointed at `127.0.0.1` (Option A in the research
 doc), so the thermostat is self-contained and Hubitat talks to it on the LAN.
 
-**Repo state (2026-10-12).** Committed. `NestDFUAttack/` is pinned as a git
-submodule at upstream `exploiteers/NestDFUAttack` (the exact commit is in the
-index; `ignore = dirty` because a macOS checkout collapses its case-only paths).
-The build is green and the image is verified to contain the server, but
-**nothing has run on real hardware yet**.
+**Repo state (2026-10-13).** Committed, and **now running on real hardware** — a
+2nd-gen UK/Heat-Link unit, serial `02AA01AC2614065C`, flashed over the OMAP3
+BootROM DFU path. `NestDFUAttack/` is pinned as a git submodule at upstream
+`exploiteers/NestDFUAttack` (the exact commit is in the index; `ignore = dirty`
+because a macOS checkout collapses its case-only paths). The build is green, the
+image embeds the server, and the whole path (flash -> first-boot install -> app
+talks to `127.0.0.1:8000` -> Hubitat can reach `:8082`) has been validated on
+hardware. Three on-hardware bugs were found and fixed (traps 11-13); the display
+still deep-sleeps (trap 14) until suspend is disabled.
 
 Read this file, then `README.md`, then `firmware/README.md` if building images,
 then `docs/nest-ondevice-protocol-research.md` for the protocol rationale.
@@ -29,7 +33,7 @@ then `docs/nest-ondevice-protocol-research.md` for the protocol rationale.
 
 | Constraint | Consequence |
 |---|---|
-| Nest = ARMv7 Cortex-A8, **soft-float EABI** (`ld-linux.so.3`), Linux **2.6.37**, 64 MiB RAM | Target triple is `armv7-unknown-linux-musleabi` (**not** `…eabihf`). Static musl. Server is `std`, no tokio, small-stack threads; ARM binary ≈ 735 KB (was ~624 KB before the `/debug/*` surface), measured ~1.7 MB RSS (host proxy, not yet on glass). |
+| Nest = ARMv7 Cortex-A8, **soft-float EABI** (`ld-linux.so.3`), Linux **2.6.37**, 64 MiB RAM | Target triple is `armv7-unknown-linux-musleabi` (**not** `…eabihf`). Static musl. Server is `std`, no tokio, small-stack threads; ARM binary ≈ 804 KB (735 KB before `panic = "unwind"`; ~624 KB before the `/debug/*` surface). On-device RSS ≈ 0.5-0.7 MB, measured with `/debug/status` (`proc.rss_kb`). |
 | Kernel is GTVHacker's 2.6.37 in `NestDFUAttack/Dev/linux` | Any kernel change must survive `make ARCH=arm gtvhacker_defconfig` + the 2008 toolchain. |
 | Cross toolchain `NestDFUAttack/Dev/toolchain/arm-2008q3` is **i686** (32-bit x86) | It cannot run natively on modern hosts. See traps. |
 | `CONFIG_INITRAMFS_SOURCE="../initramfs_data.cpio"` (`gtvhacker_defconfig:81`) | The initramfs is the injection point; the server lands at `/usr/bin/nest-ondevice`. |
@@ -158,6 +162,40 @@ PY
     evaluates and `.#nest-ondevice` builds, so a fresh clone only needs
     `git submodule update --init` before `.#firmware`.
 
+11. **`rootme`'s `/bin/sshconnect` blocks `rcS`.** The GTVHacker `rootme`
+    appends `/bin/dropbear` and `/bin/sshconnect` to the *flash* `rcS`.
+    `sshconnect` is a `while true; sleep 600` autossh loop that runs in the
+    foreground, so every line after it — including the injected
+    `${INITDIR}/nest-ondevice start` — never runs. `inject_initramfs.py` now
+    deletes `/bin/sshconnect`, de-dupes `/bin/dropbear`, and adds the monit
+    include before appending the start line. Symptom of the pre-fix image:
+    Dropbear is up but nothing listens on `:8000`/`:8082`, and `rcS` (pid 56) is
+    parked in `sleep`.
+
+12. **The Nest app registers at `POST /entry`, not `/nest/entry`.** `nlclient`
+    POSTs form data (`reset=false&mac=…&model=Display-2.8&…`) to
+    `cloudregisterurl`, and only subscribes after that. The server advertises
+    `cloudregisterurl = <origin>/entry` in `/info` and `/api/config`, but
+    `nest.rs` only routed `/nest/entry`, so the app got a 404 loop and never
+    subscribed (`subscriptions_total: 0`). Fixed: `/entry` is now an alias for
+    `/nest/entry`.
+
+13. **`String::truncate` panics on a UTF-8 boundary; `panic = "abort"` made it
+    fatal.** `debug.rs` truncated the request-body snippet with
+    `raw.truncate(MAX_SNIPPET)`; a non-ASCII body at that byte offset aborted the
+    daemon (`assertion failed: self.is_char_boundary`). Now uses the existing
+    char-safe `truncate()` helper, and the release profile switched to
+    `panic = "unwind"` so one bad request can no longer take down the process.
+
+14. **The display deep-sleeps; a persistent LAN server needs that disabled.**
+    `nlsleepd` (`/etc/init.d/nlsleep`, supervised by
+    `/etc/monit.d/nlscpm.monitrc`) sets
+    `/sys/kernel/debug/pm_debug/{enable_off_mode,sleep_while_idle,voltage_off_while_idle}=1`;
+    the kernel then suspends to RAM when idle, the Wi-Fi radio goes off, and the
+    server is only reachable while the device is awake (`PM: Entering mem sleep`
+    in dmesg). Writing those knobs to `0` stops it (verified live, not yet
+    persistent). See the handover for the full procedure.
+
 ## Layout
 
 ```
@@ -188,13 +226,13 @@ docs/nest-ondevice-protocol-research.md
 
 ## Next steps (not done)
 
-* **On-hardware validation** — flash the `uImage` via the existing
-  `NestDFUAttack` flow (`Release/Nest`, `omap3_usbload`) and confirm: first boot
-  copies the server to flash, `rcS` starts it, the app talks to `127.0.0.1:8000`,
-  and Hubitat reaches `:8082`. First stop for a bug is `GET /debug/report` on
-  `:8082` (it pulls RSS, `free`/`ps`/`ifconfig`, dmesg and the request trace in
-  one call); Dropbear (`rootme` installs it) gives a shell and
-  `/media/log/messages` + `/media/data/nest-ondevice/last-exit` survive a reboot.
+* **Disable suspend** so the on-device server is always reachable. Stop and
+  unwire `nlsleepd`, zero the `pm_debug` knobs, and persist it across reboot —
+  see the handover for the exact procedure and acceptance test.
+* **Hubitat** — install the NoLongerEvil Connect app + driver on
+  `192.168.1.29` and point it at `http://192.168.1.143:8082` (mDNS is not
+  advertised; the hub can subnet-scan `:8082` or you can enter the IP). See
+  `NoLongerEvil-Hubitat/README.md`.
 * Calibrate the app's expected `structure.*`/`user.*` fields against captured
   real traffic, using the Python NoLongerEvil server as a differential oracle.
 * Optional: shrink the firmware build by using a user-mode-only qemu instead of

@@ -232,11 +232,16 @@ impl Trace {
         let body = if req.body.is_empty() {
             None
         } else {
-            let mut raw = String::from_utf8_lossy(&req.body).into_owned();
-            if raw.len() > MAX_SNIPPET {
-                raw.truncate(MAX_SNIPPET);
-                raw.push('…');
-            }
+            let raw = String::from_utf8_lossy(&req.body).into_owned();
+            // `String::truncate` panics if the byte index is not a char
+            // boundary (and UTF-8 from a hostile/odd client makes that easy).
+            // Reuse the char-safe helper so one bad body can't abort the daemon
+            // (panic = "abort" made that fatal on-device).
+            let raw = if raw.len() > MAX_SNIPPET {
+                truncate(&raw, MAX_SNIPPET)
+            } else {
+                raw
+            };
             Some(scrub(&raw))
         };
         Trace {

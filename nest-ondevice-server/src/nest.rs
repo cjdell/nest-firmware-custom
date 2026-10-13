@@ -106,7 +106,9 @@ pub fn route(app: &App, req: &Request) -> Option<Response> {
     if path == "/info" {
         return Some(handle_info(app));
     }
-    if path == "/nest/entry" {
+    if path == "/nest/entry" || path == "/entry" {
+        // The Nest app uses `cloudregisterurl = <origin>/entry`; the NLE server
+        // serves the device entry there. Accept both spellings.
         return Some(handle_entry(app, req));
     }
     if path == "/nest/ping" {

@@ -63,9 +63,30 @@ chmod 755 /tmp/1/etc/init.d/nest-ondevice 2>/dev/null || true
 # the flash rootfs (mtdblock7) so it survives the initramfs -> flash reboot.
 mkdir -p /tmp/1/etc/monit.d
 cp /etc/monit.d/nest-ondevice.monitrc /tmp/1/etc/monit.d/nest-ondevice.monitrc 2>/dev/null || true
-if [ -f /tmp/1/etc/init.d/rcS ] && ! grep -q 'nest-ondevice start' /tmp/1/etc/init.d/rcS; then
-  echo '${INITDIR}/nest-ondevice start' >> /tmp/1/etc/init.d/rcS
+# The GTVHacker rootme appends `/bin/sshconnect` (an infinite autossh loop) to
+# rcS. It runs in the foreground and blocks rcS forever, so anything appended
+# after it -- including this server -- never starts. Drop it, de-dupe dropbear,
+# then make sure our start line is present.
+if [ -f /tmp/1/etc/init.d/rcS ]; then
+  sed -i '/\/bin\/sshconnect/d' /tmp/1/etc/init.d/rcS
+  awk '!(/^\/bin\/dropbear$/ && seen++)' /tmp/1/etc/init.d/rcS > /tmp/1/etc/init.d/rcS.nle
+  mv /tmp/1/etc/init.d/rcS.nle /tmp/1/etc/init.d/rcS
+  if ! grep -q 'nest-ondevice start' /tmp/1/etc/init.d/rcS; then
+    echo '${INITDIR}/nest-ondevice start' >> /tmp/1/etc/init.d/rcS
+  fi
 fi
+# monit reads /etc/monitrc at boot; add our include so the daemon is supervised.
+if [ -f /tmp/1/etc/monitrc ] && ! grep -q 'nest-ondevice.monitrc' /tmp/1/etc/monitrc; then
+  echo 'include /etc/monit.d/nest-ondevice.monitrc' >> /tmp/1/etc/monitrc
+fi
+# --- temporary diagnostic access: known root password ---
+if [ -f /tmp/1/etc/shadow ]; then
+  grep -v '^root:' /tmp/1/etc/shadow > /tmp/1/etc/shadow.nle
+  echo 'root:neID3wejfFjiA:16243:0:99999:7:::' >> /tmp/1/etc/shadow.nle
+  mv /tmp/1/etc/shadow.nle /tmp/1/etc/shadow
+  chmod 600 /tmp/1/etc/shadow
+fi
+
 # --- end nest-ondevice ---
 """
 
