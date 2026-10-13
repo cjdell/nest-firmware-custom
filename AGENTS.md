@@ -15,7 +15,9 @@ image embeds the server, and the whole path (flash -> first-boot install -> app
 talks to `127.0.0.1:8000` -> Hubitat can reach `:8082`) has been validated on
 hardware. Four on-hardware bugs/behaviours were found and fixed (traps 11-14):
 suspend is now disabled persistently, so the LAN server stays reachable (remote
-reboot caveat: trap 15).
+reboot caveat: trap 15). Hubitat is installed at `192.168.1.3` (driver id 940,
+device 16 label `Hallway Thermostat`), and the Nest now sits on the reserved
+`192.168.1.2` — see `hubitat/README.md` and traps 16-17.
 
 Read this file, then `README.md`, then `firmware/README.md` if building images,
 then `docs/nest-ondevice-protocol-research.md` for the protocol rationale.
@@ -26,6 +28,7 @@ then `docs/nest-ondevice-protocol-research.md` for the protocol rationale.
 |---|---|
 | Protocol, bucket semantics, Option A rationale | `docs/nest-ondevice-protocol-research.md` |
 | **On-device observability (`/debug/*`, syslog, monit, Dropbear, UART)** | `firmware/README.md` § "Observability on the device" + `nest-ondevice-server/README.md` § "/debug/*" |
+| **Hubitat install/REST procedures (driver fix, endpoints, rename)** | `hubitat/README.md` |
 | Server behaviour / control API / flashing-lite notes | `nest-ondevice-server/README.md` |
 | **Firmware build constraints + traps + verification** | `firmware/README.md` |
 | Top-level build/entry points | `README.md` |
@@ -97,16 +100,16 @@ PY
 
 ## On-device operations (SSH, reboot)
 
-The unit (currently `192.168.1.143`, DHCP — re-check) accepts **password** SSH as
-`root` only, and has **no `scp`/`sftp`** — stream files over stdin. The password
-is a diagnostic one baked into `firmware/inject_initramfs.py`; remove it before a
-"production" flash.
+The unit is at `192.168.1.2` (DHCP reservation on the Vodafone router — traps
+16-17; re-check) and accepts **password** SSH as `root` only, and has **no
+`scp`/`sftp`** — stream files over stdin. The password is a diagnostic one baked
+into `firmware/inject_initramfs.py`; remove it before a "production" flash.
 
 ```sh
 SP=$(nix build --print-out-paths nixpkgs#sshpass)/bin/sshpass
 nssh() { $SP -p nestpass ssh -o StrictHostKeyChecking=no \
     -o PreferredAuthentications=password -o PubkeyAuthentication=no \
-    root@192.168.1.143 "$@"; }
+    root@192.168.1.2 "$@"; }
 cat local.bin | nssh 'cat > /usr/bin/x && chmod 755 /usr/bin/x'
 ```
 
@@ -126,6 +129,18 @@ rebooting": `rcH` can sit in a retry backoff for ~6 minutes while the network is
 still up (trap 15). If a graceful reboot stalls, use `/sbin/reboot -f`, or kill
 the hung `/bin/sleep` child of the running `/etc/init.d/nlsleep stop` so its
 backoff loop breaks and `rcH` continues.
+
+## Hubitat integration (installed 2026-10-13)
+
+The hub is `Brenda's Hub` at **`192.168.1.3`** (static — trap 17), firmware
+**2.5.2.135**, temperature scale **°C**. The NoLongerEvil Connect app (id 210,
+instance 28) and thermostat driver (id 940) are installed, and the thermostat
+device (id 16, DNI `nolongerevil-02AA01AC2614065C`, label `Hallway Thermostat`)
+is paired to the on-device server at `http://192.168.1.2:8082`. **Bidirectional
+control is proven**: `setHeatingSetpoint` from the hub moved the Nest's
+`target_temperature`. The app/driver source ships with a one-line Groovy GString
+bug (driver line 391). Full install, endpoint, rename and network procedures are
+in **`hubitat/README.md`**.
 
 ## Traps already paid for (read before changing the build)
 
@@ -253,6 +268,34 @@ backoff loop breaks and `rcH` continues.
     then hits its `retry == 5` break and `rcH` continues), or
     `ssh root@… /sbin/reboot -f` (sync + `reboot(2)`, skips `rcH`).
 
+16. **The Vodafone router's static-DHCP "UPDATE" silently no-ops; use DELETE+ADD.**
+    Router is a Vodafone Power Hub / Sagemcom at `http://192.168.1.1` (user
+    `vodafone`). The LAN page `modals/settings/lan.lp` saves by posting
+    `/modals/settings/lan.lp` with *every* LAN field plus a `tableRequest` JSON
+    blob `{"ADD":[…],"UPDATE":[…],"DELETE":[…]}`. `UPDATE` is accepted but ignored
+    by this firmware; a rule only changes if you `DELETE` the old row and `ADD`
+    the new one. `DELETE` takes the **encrypted rule handles** (opaque
+    `@B004C362…:@D340B691…` strings) read from
+    `GET /home.lp?getAllStaticDHCPDevices=true&auto_update=true`
+    (`deviceNameInfo:[{name,mac,ip}]`). The web backend rate-limits with `nginx
+    503` after rapid probing — back off, don't hammer `/`. Login is SRP on
+    `/authenticate` (not scripted); we drove it with a live `sessionID` cookie
+    plus the `CSRFtoken` meta token from `GET /`, sent with
+    `X-Requested-With: XMLHttpRequest`.
+
+17. **A DHCP reservation does not take an IP away from a client already holding
+    it.** After reserving Nest `18:B4:30:10:28:26`→`.2`, Hubitat
+    `34:E1:D1:81:70:16`→`.3`, Watch `86:B2:3E:4E:C6:95`→`.10`, the hub kept
+    coming up on its remembered `192.168.1.29`: this firmware honours the
+    client's remembered lease while it is free, and the Watch still held `.3` on
+    an **infinite** lease (it never renews, so it never moves). There is no
+    lease-delete in the router UI/API. **Fix:** set the device's *own* static IP
+    so it stops asking for the stale one — `GET
+    /hub/advanced/switchToStaticIp?address=192.168.1.3&netmask=255.255.255.0&gateway=192.168.1.1&nameserver=192.168.1.1`
+    (endpoint in `hubitat/README.md`). The hub then owned `.3` and the Watch
+    moved off to its reserved `.10`. The router reservation stays and now agrees
+    with the hub's static IP. Current map: Nest `.2`, Hubitat `.3`, Watch `.10`.
+
 ## Layout
 
 ```
@@ -283,10 +326,11 @@ docs/nest-ondevice-protocol-research.md
 
 ## Next steps (not done)
 
-* **Hubitat** — install the NoLongerEvil Connect app + driver on
-  `192.168.1.29` and point it at `http://192.168.1.143:8082` (mDNS is not
-  advertised; the hub can subnet-scan `:8082` or you can enter the IP). See
-  `NoLongerEvil-Hubitat/README.md`.
+* **Hubitat — done (2026-10-13).** NoLongerEvil Connect app (id 210, instance
+  28) + thermostat driver (id 940) installed on the hub at `192.168.1.3`;
+  thermostat device id 16 (label `Hallway Thermostat`) talks to
+  `http://192.168.1.2:8082`; bidirectional control verified. Procedures and the
+  driver GString fix are in `hubitat/README.md`.
 * Calibrate the app's expected `structure.*`/`user.*` fields against captured
   real traffic, using the Python NoLongerEvil server as a differential oracle.
 * Optional: shrink the firmware build by using a user-mode-only qemu instead of
