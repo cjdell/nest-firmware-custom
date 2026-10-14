@@ -72,6 +72,22 @@ reproducibility measure, not only a case fix: the build then sees exactly the
 tracked tree, so an untracked or locally edited file in one checkout cannot make
 that host's image differ.
 
+**Which means: edit the kernel in the submodule's git, not in the working
+tree.** An uncommitted change under `NestDFUAttack/Dev/linux` is invisible to
+`./build firmware` — the archive step throws it away. Commit it to the submodule
+(`cjdell/NestDFUAttack`, branch `nest-ondevice`) and move the parent's gitlink,
+or point `NEST_LINUX_DIR` at a tree of your own for a throwaway experiment. The
+asymmetry is a habit to unlearn: the *other* two vendored inputs —
+`Dev/initramfs_data.cpio` and `Dev/toolchain/arm-2008q3` — are read straight from
+the checkout, so edits there take effect immediately.
+
+Nothing in `Dev/` is patched in git today. Everything we change is applied at
+build time to a copy: `scripts/mkcompile_h` and the `timeconst.pl` Perl fix
+(`firmware/default.nix`), the `realview` config toggles (`firmware/qemu.nix`),
+the initramfs injection (`firmware/inject_initramfs.py`), and the toolchain
+wrappers. So the fork's `nest-ondevice` branch is a landing place for kernel
+work, not a delta — yet.
+
 ## How the server gets in
 
 `firmware/inject_initramfs.py` rewrites the base cpio at the archive level, so
