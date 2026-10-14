@@ -1,5 +1,15 @@
+# The vendored GTVHacker kernel + 2008 toolchain the firmware build reads.
+# Pinned to our fork of exploiteers/NestDFUAttack: `nest-ondevice` is the branch
+# this repo carries (it starts at upstream 930b834b, the only upstream commit),
+# so kernel work lands on the fork instead of on someone else's master. The
+# gitlink in the index is the source of truth, not the branch. HTTPS so a plain
+# `git submodule update --init` works without keys; push over ssh (see the
+# submodule's own origin).
+#
+# ignore = dirty because a macOS/APFS checkout collapses the 13 case-only
+# netfilter paths — see AGENTS.md trap 3.
 [submodule "NestDFUAttack"]
 	path = NestDFUAttack
-	url = https://github.com/exploiteers/NestDFUAttack.git
-	branch = master
+	url = https://github.com/cjdell/NestDFUAttack.git
+	branch = nest-ondevice
 	ignore = dirty

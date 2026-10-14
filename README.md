@@ -73,8 +73,9 @@ sh firmware/qemu-smoke.sh            # boot it under qemu and assert HTTP works
 ```
 
 `.#firmware` needs the vendored GTVHacker checkout for the kernel, base
-initramfs and 2008 ARM toolchain: the `NestDFUAttack` submodule, pinned to an
-upstream commit and read via `NEST_ATTACK_DIR`. `--impure` is required because
+initramfs and 2008 ARM toolchain: the `NestDFUAttack` submodule, pinned to
+`cjdell/NestDFUAttack` (our fork of `exploiteers/NestDFUAttack`, branch
+`nest-ondevice`) and read via `NEST_ATTACK_DIR`. `--impure` is required because
 `firmware/default.nix` reads that variable with `builtins.getEnv`, which flakes
 only honour under impure evaluation:
 

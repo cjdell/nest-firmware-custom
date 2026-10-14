@@ -8,9 +8,10 @@ doc), so the thermostat is self-contained and Hubitat talks to it on the LAN.
 
 **Repo state (2026-10-13).** Committed, and **now running on real hardware** — a
 2nd-gen UK/Heat-Link unit, serial `02AA01AC2614065C`, flashed over the OMAP3
-BootROM DFU path. `NestDFUAttack/` is pinned as a git submodule at upstream
-`exploiteers/NestDFUAttack` (the exact commit is in the index; `ignore = dirty`
-because a macOS checkout collapses its case-only paths). The build is green, the
+BootROM DFU path. `NestDFUAttack/` is pinned as a git submodule at **our fork**,
+`cjdell/NestDFUAttack` branch `nest-ondevice` (started at upstream
+`exploiteers/NestDFUAttack` 930b834b; the exact commit is in the index,
+`ignore = dirty` because a macOS checkout collapses its case-only paths). The build is green, the
 image embeds the server, and the whole path (flash -> first-boot install -> app
 talks to `127.0.0.1:8000` -> Hubitat can reach `:8082`) has been validated on
 hardware. Four on-hardware bugs/behaviours were found and fixed (traps 11-14):
@@ -384,7 +385,7 @@ in **`hubitat/README.md`**.
 
 ```
 flake.nix                     deps + packages (nest-ondevice, firmware, initramfs) + devShell
-.gitmodules                   pins NestDFUAttack/ to upstream exploiteers/NestDFUAttack
+.gitmodules                   pins NestDFUAttack/ to cjdell/NestDFUAttack @ nest-ondevice
 firmware/
   default.nix                 qemu-i386 toolchain wrappers + kernel make + mkimage
   mkcompile_h                 deterministic replacement for the kernel's build-identity generator
