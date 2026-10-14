@@ -2,12 +2,13 @@
 
 Self-hosting for the Google Nest thermostat, built with Nix flakes.
 
-Two pieces:
+Three pieces:
 
 | Path | What it is |
 |---|---|
 | [`nest-ondevice-server/`](nest-ondevice-server/) | A compact **Rust** port of the NoLongerEvil Nest-protocol server, sized to run on the thermostat itself, with a read-only `/debug/*` observability API for agent/remote debugging. |
 | [`firmware/`](firmware/) | A **firmware image** (the GTVHacker `uImage`) that bundles that server into the initramfs. |
+| [`hubitat/`](hubitat/) | The **Hubitat app + driver** we run (vendored from upstream, patched), plus `push.sh` and the reverse-engineered hub REST procedures. |
 
 The protocol research and the design rationale live in
 [`docs/nest-ondevice-protocol-research.md`](docs/nest-ondevice-protocol-research.md).
@@ -82,12 +83,16 @@ bin/macos/
   build.sh                    # Mac driver: stage + Apple-container VM
   vm-build.sh                 # the actual build (runs inside the VM)
 nest-ondevice-server/         # the Rust server
+hubitat/
+  apps/, drivers/             # Hubitat Groovy we run (vendored + patched)
+  push.sh                     # push them to the hub over its REST API
+  README.md                   # hub install/control/rename procedures
 docs/nest-ondevice-protocol-research.md
 ```
 
 `NestDFUAttack/` is a **submodule** pinned to an upstream commit and tracked
 via `.gitmodules` (run `git submodule update --init` after cloning). The other
-upstream trees (`NoLongerEvil-*`, `hubitatcontrol/`) are git-ignored sibling
-checkouts used only as references; none are flake inputs. The build reads
-`NestDFUAttack/` via `NEST_ATTACK_DIR` (directly on Linux, staged into the VM
-on macOS).
+upstream trees (`NoLongerEvil-SelfHosted/`, `NoLongerEvil-Thermostat/`,
+`hubitatcontrol/`) are git-ignored sibling checkouts used only as references;
+none are flake inputs. The build reads `NestDFUAttack/` via `NEST_ATTACK_DIR`
+(directly on Linux, staged into the VM on macOS).

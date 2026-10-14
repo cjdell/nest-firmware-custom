@@ -1,10 +1,10 @@
 # Vendored upstream checkouts that are not needed to build the flake outputs.
 # They are NOT flake inputs and not submodules; the builder stages them on demand
 # via NEST_ATTACK_DIR. (NestDFUAttack/ is a tracked, pinned submodule instead —
-# see .gitmodules.)
+# see .gitmodules.) The Hubitat app/driver we run are NOT here any more: they are
+# vendored, patched and tracked under hubitat/.
 /NoLongerEvil-SelfHosted/
 /NoLongerEvil-Thermostat/
-/NoLongerEvil-Hubitat/
 /hubitatcontrol/
 
 # Build outputs

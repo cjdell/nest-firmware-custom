@@ -8,6 +8,12 @@ LAN), instead of requiring a separate NoLongerEvil server?
 **Source clone:** `NestDFUAttack` (shallow, 2.0 GB)
 **Also relevant:** `NoLongerEvil-Thermostat` (builder + installer)
 
+> **Status update (2026-10-14).** This was the pre-build research snapshot and is
+> kept as such. **Option A has since shipped and runs on hardware**: the Rust
+> server (`nest-ondevice-server/`) is baked into the initramfs, the app is
+> pointed at `127.0.0.1`, and Hubitat talks to `192.168.1.2:8082`. Read §9 for
+> the current state; treat "not proven" / "next deep dive" below as history.
+
 ---
 
 ## TL;DR
@@ -539,6 +545,9 @@ external server is acceptable, it remains dramatically cheaper. If it is not,
 
 ## 6. Concrete investigation plan (next deep dive)
 
+> Superseded for Option A, which was built instead of investigated further
+> (2026-10-14). Still open if you want the D-Bus/Lua shortcuts in items 2-4.
+
 1. **Dump `mtdblock7`** from a rooted unit. Build NLE with `--enable-root-access`,
    SSH in as root, then:
    ```sh
@@ -621,14 +630,20 @@ grep -rIn 'enablebotautomation\|tempscreenoutput\|controlserver' \
 
 ## 9. Implications for the Hubitat integration
 
-- **Today:** an external NoLongerEvil server is still required; the Hubitat
-  app/driver in `NoLongerEvil-Hubitat/` targets its control API.
-- **If Option A lands:** the thermostat becomes the server. Hubitat (or the
-  existing app/driver, with the URL pointed at the thermostat) can talk to the
-  Nest directly on the LAN — no other host. This is the only route that fully
-  satisfies the "just the Hubitat hub" requirement.
-- **If Option B/C lands:** a thin on-device bridge exposes an HTTP API that the
-  Hubitat app/driver can consume; the external server is still removable.
+*Option A landed (2026-10-13): the thermostat is the server, and Hubitat talks
+to it directly.*
+
+- **Now:** no external NoLongerEvil host. The Rust server runs on the
+  thermostat and serves the same control API (`/status`, `/command`,
+  `/api/devices`, `/api/config`) on `192.168.1.2:8082`; the Hubitat app/driver
+  are vendored and patched under `hubitat/` and installed on the hub by
+  `hubitat/push.sh`. This is the route that fully satisfies the "just the
+  Hubitat hub" requirement — the only always-on host is the thermostat itself.
+- The upstream Hubitat package still assumes a Docker/Python server (Compose,
+  Hubitat Package Manager, an mDNS advertiser, `DEPLOY.md`). None of that is
+  used here; see `hubitat/README.md` for what replaced it and why.
+- Option B/C (on-device bridge to `nlclient`) remain unexplored: the current
+  design keeps the Nest-protocol server as the source of truth instead.
 
 ---
 
@@ -662,4 +677,5 @@ successful endpoint change.
 ### E. Clone/working paths
 - `NestDFUAttack` (shallow): the pinned submodule at `NestDFUAttack/`
 - Firmware builder: `NoLongerEvil-Thermostat` (sibling clone)
-- Hubitat integration: `NoLongerEvil-Hubitat` (sibling clone)
+- Hubitat app/driver: vendored + patched **in this repo** under `hubitat/`
+  (upstream `codykociemba/NoLongerEvil-Hubitat`, MIT; no local clone kept)

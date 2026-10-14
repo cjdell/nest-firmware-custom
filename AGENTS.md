@@ -19,6 +19,13 @@ reboot caveat: trap 15). Hubitat is installed at `192.168.1.3` (driver id 940,
 device 16 label `Hallway Thermostat`), and the Nest now sits on the reserved
 `192.168.1.2` — see `hubitat/README.md` and traps 16-17.
 
+**Tidy-up (2026-10-14).** The Hubitat app/driver we run are **vendored and
+patched in this repo** under `hubitat/` (tracked); `hubitat/push.sh` is how they
+go onto the hub. The `NoLongerEvil-Hubitat/` sibling checkout — Docker
+Compose, Hubitat Package Manager manifest, mDNS advertiser, `DEPLOY.md` — was
+deleted: it all assumes a separate Docker/Python server, which we rejected when
+we chose to run our own Rust server on the device (traps 10, 19).
+
 Read this file, then `README.md`, then `firmware/README.md` if building images,
 then `docs/nest-ondevice-protocol-research.md` for the protocol rationale.
 
@@ -28,7 +35,7 @@ then `docs/nest-ondevice-protocol-research.md` for the protocol rationale.
 |---|---|
 | Protocol, bucket semantics, Option A rationale | `docs/nest-ondevice-protocol-research.md` |
 | **On-device observability (`/debug/*`, syslog, monit, Dropbear, UART)** | `firmware/README.md` § "Observability on the device" + `nest-ondevice-server/README.md` § "/debug/*" |
-| **Hubitat install/REST procedures (driver fix, endpoints, rename)** | `hubitat/README.md` |
+| **Hubitat: the Groovy we run + install/REST procedures (driver fixes, endpoints, rename)** | `hubitat/` (`apps/`, `drivers/`, `push.sh`) + `hubitat/README.md` |
 | Server behaviour / control API / flashing-lite notes | `nest-ondevice-server/README.md` |
 | **Firmware build constraints + traps + verification** | `firmware/README.md` |
 | Top-level build/entry points | `README.md` |
@@ -206,11 +213,14 @@ in **`hubitat/README.md`**.
    a README no longer invalidates the ~3m40s kernel build. Keep it that way.
 
 10. **The vendored trees are not flake inputs.** `NestDFUAttack/` is a pinned
-    git submodule (`.gitmodules`); the `NoLongerEvil-*` and `hubitatcontrol/`
-    trees are git-ignored sibling checkouts. All are read *impurely* via
+    git submodule (`.gitmodules`); `NoLongerEvil-SelfHosted/`,
+    `NoLongerEvil-Thermostat/` and `hubitatcontrol/` are git-ignored sibling
+    checkouts kept only as references. All are read *impurely* via
     `NEST_ATTACK_DIR` (and `NEST_LINUX_DIR`). With them unset the flake still
     evaluates and `.#nest-ondevice` builds, so a fresh clone only needs
-    `git submodule update --init` before `.#firmware`.
+    `git submodule update --init` before `.#firmware`. The Hubitat app/driver
+    are **not** part of this scheme any more — they are tracked under `hubitat/`
+    (trap 19).
 
 11. **`rootme`'s `/bin/sshconnect` blocks `rcS`.** The GTVHacker `rootme`
     appends `/bin/dropbear` and `/bin/sshconnect` to the *flash* `rcS`.
@@ -312,7 +322,20 @@ in **`hubitat/README.md`**.
     missing attribute, not the user-driver-ness, that matters. Fix: also emit
     `coolingSetpoint` in the non-cool branch (the value is cosmetic — the Nest
     cannot cool). See `hubitat/README.md` § Google Home and
-    `hubitat/nolongerevil-thermostat.patch`.
+    `hubitat/drivers/nolongerevil-thermostat.groovy`.
+
+19. **The Hubitat Groovy is vendored here; upstream's driver does not
+    compile.** We keep `hubitat/apps/nolongerevil-connect.groovy` (byte-identical
+    to upstream) and `hubitat/drivers/nolongerevil-thermostat.groovy` (upstream +
+    the trap 18 fix + an **illegal-GString** fix: upstream's
+    `replaceAll("/+$", "")` is a double-quoted GString, so the driver fails to
+    compile at all). There is no separate `.patch` any more — the fixes are
+    applied in the file, and `hubitat/README.md` records the pristine upstream
+    sha256s. **Never re-import from upstream or paste hub-UI edits back over
+    these files**; edit here and `./hubitat/push.sh driver`. Upstream's Docker
+    Compose / Package Manager / mDNS-advertiser deploy path was deleted, not
+    moved: the hub finds our server by probing `GET /api/config`, and the server
+    runs on the thermostat.
 
 ## Layout
 
@@ -328,6 +351,11 @@ bin/macos/
   build.sh                    Mac driver: stage -> Apple-container VM, verbs start|wait|log|status|stage|vm|stop
   vm-build.sh                 the real build; case-fix, nix build, collect artifacts+manifests
 nest-ondevice-server/         Rust server (src/, Cargo.*, test_smoke.py, deploy/)
+hubitat/
+  apps/, drivers/             Hubitat Groovy we run (vendored from upstream + patched)
+  push.sh                     push them to the hub (app 210 / driver 940) over REST
+  LICENSE.nolongerevil        MIT, upstream copyright (we vendor + modify)
+  README.md                   hub deployment facts + reverse-engineered hub REST API
 docs/nest-ondevice-protocol-research.md
 ```
 

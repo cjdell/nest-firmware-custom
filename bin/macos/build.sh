@@ -64,7 +64,6 @@ stage() {
         --exclude NestDFUAttack/ \
         --exclude NoLongerEvil-SelfHosted/ \
         --exclude NoLongerEvil-Thermostat/ \
-        --exclude NoLongerEvil-Hubitat/ \
         --exclude hubitatcontrol/ \
         --exclude nest-ondevice-server/target/ \
         --exclude .DS_Store \
