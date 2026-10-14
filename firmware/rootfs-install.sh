@@ -88,7 +88,13 @@ if [ -f "$RCS" ]; then
     # every line after it — including our start line — never runs. Drop it, then
     # keep a single /bin/dropbear. (AGENTS.md trap 11.)
     if grep -q '/bin/sshconnect' "$RCS"; then
-        sed -i '/\/bin\/sshconnect/d' "$RCS"
+        # No `sed -i`: the in-place flag is GNU syntax (BSD sed takes the next
+        # argument as a backup suffix and then treats the *file* as the script)
+        # and is not something to bet a 2008 busybox rootfs on. Edit through a
+        # temporary like the dropbear dedup below does.
+        sed '/\/bin\/sshconnect/d' "$RCS" > "$RCS.nle" 2>/dev/null \
+            && mv "$RCS.nle" "$RCS" 2>/dev/null
+        rm -f "$RCS.nle" 2>/dev/null
         nest_log "rcS: removed the sshconnect loop that blocked rcS"
     fi
     awk '!(/^\/bin\/dropbear$/ && seen++)' "$RCS" > "$RCS.nle" 2>/dev/null \

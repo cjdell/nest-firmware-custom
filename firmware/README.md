@@ -24,6 +24,22 @@ persists between runs, so only changed derivations rebuild. The build itself is
 `bin/nix-build.sh` on both hosts, which is why the images match; `./build` picks
 the right one for the machine it is on.
 
+**The VM is arm64, and that is worth knowing before you compare checksums.** The
+container runtime also offers an amd64 VM under Rosetta (`NEST_VM_ARCH=amd64`),
+but it cannot build this image: Rosetta-for-Linux does not preserve a custom
+`argv[0]` across `exec` — `bash -c 'exec -a MARKER bash -c "echo $0"'` prints the
+resolved binary path under Rosetta and `MARKER` on a native host, arm64 or
+x86_64. nixpkgs' python environments are C trampolines that locate their prefix
+from `argv[0]`, so under Rosetta the env-python reports the bare interpreter as
+its prefix and every `autoPatchelfHook` fails; the first thing the firmware
+build hits is `rust-std`: `ModuleNotFoundError: No module named 'elftools'`.
+A host that rewrites `argv[0]` can also change build output silently, which is
+worse than failing. `binfmt_misc` cannot be mounted inside an Apple container
+(`mount: permission denied`), so `qemu-x86_64` user emulation is not available
+as a substitute either. To get the x86_64 image bytes from a Mac, build on a
+real x86_64 host — `./build firmware` will drive one over ssh, see
+"Build-host architecture" below.
+
 ## The 2008 toolchain: native on x86_64, qemu-i386 elsewhere
 
 `NestDFUAttack/Dev/toolchain/arm-2008q3` is a 32-bit **i686** CodeSourcery
@@ -239,6 +255,32 @@ the artifacts back into `dist/`, so the two hosts look identical from here. Use
 `./build wait`) to collect; `bash bin/container.sh` exposes the lower-level
 verbs (`run|start|wait|log|exec|status|path|stage|vm|stop`).
 
+To build the canonical x86_64 image from the Mac, point `./build` at an x86_64
+Linux host. It rsyncs the tree (minus `.git` and the submodule, so the collapsed
+case-only paths cannot travel, trap 3) into a scratch directory it owns, refuses
+to start unless that host's `NestDFUAttack` is at the commit this repo pins, and
+copies back only what the build listed:
+
+```sh
+NEST_BUILD_HOST=user@host NEST_BUILD_ATTACK=~/nest/NestDFUAttack ./build firmware
+```
+
+Two container traps, both now guarded in `bin/container.sh`:
+
+* **virtiofs mounts are fixed when the container is created**, and `container
+  create` is skipped if the name already exists — so a builder left over from
+  another checkout, or from before `NEST_VM_CACHE` moved, keeps mounting the old
+  directories and silently builds stale sources while reporting success. It
+  writes into directories that no longer exist on the host, so nothing even
+  arrives in `dist/`. `assert_mounts` compares the container's config against
+  the paths this checkout needs and dies with the recreate command.
+* **`NEST_LINUX_TAR` must name the path the VM sees** (`/out/…`, not the host's
+  `$out/…`). If it does not exist inside the VM, `bin/nix-build.sh` falls back to
+  `git archive` there, and that cannot work either: the submodule's gitdir lives
+  outside the mount, so only the host can produce the case-exact archive. The
+  symptom is `fatal: not a git repository: /nest/attack/../.git/modules/…`
+  followed by `does not look like a tar archive`.
+
 `NEST_ATTACK_DIR` must point at the vendored GTVHacker checkout (the
 `NestDFUAttack` submodule; run `git submodule update --init` after cloning).
 With it unset the flake still evaluates and `nix build .#nest-ondevice` works
@@ -258,9 +300,12 @@ outside the flake source.
 
 ## Reproducible images
 
-The `uImage` is bit-reproducible: the same source builds to the same bytes on
-either host, so "flash this image" is a checksum, not folklore. Everything that
-could differ between machines is pinned in `firmware/default.nix`:
+The `uImage` is bit-reproducible **for a given build-host architecture**: the
+same source rebuilds to the same bytes on the same kind of machine, so "flash
+this image" is a checksum, not folklore. x86_64-linux is the reference — the
+digest quoted in `AGENTS.md` is an x86_64 digest, and an aarch64 builder prints
+a different one ("Build-host architecture" below). Everything that could differ
+between machines of the *same* architecture is pinned in `firmware/default.nix`:
 
 | Leak | Where it lands | Fix |
 |---|---|---|
@@ -269,8 +314,9 @@ could differ between machines is pinned in `firmware/default.nix`:
 | `ctime()` in the generated `.config` | embedded by `CONFIG_IKCONFIG=y`, gzip'd into vmlinux | `KCONFIG_NOTIMESTAMP=1` |
 | `time()` in the uImage header | bytes 8-11 of the 64-byte header (+ the header CRC) | `SOURCE_DATE_EPOCH=0`, which `mkimage` honours |
 | build path / locale | any tool that echoes its argv | nix sandbox (`/build`), `TZ=UTC LC_ALL=C LANG=C` |
+| nix's sandbox switched off in the image's `nix.conf` | the build dir becomes the real `/nix/store`, not `/build`: some fixups change and `rust-std`'s `autoPatchelfHook` dies outright | `sandbox = true` in `bin/nix-build.sh`, not left to the image default |
 | `make -j<N>` width | link/compress order | unchanged (verified identical at `-j1` and `-j32`) |
-| i686 toolchain run natively vs under `qemu-i386` | the compiler *invocation* only | verified identical (`NEST_TOOLCHAIN=native\|qemu`) |
+| i686 toolchain run natively vs under `qemu-i386` | the compiler *invocation* only | verified identical **on one host** (`NEST_TOOLCHAIN=native\|qemu`); across architectures it is not (below) |
 
 The banner in a reproducible image reads
 `Linux version 2.6.37 (nest@ondevice) (gcc version 4.3.2 (Sourcery G++ Lite 2008q3-72) ) #1  PREEMPT 1970-01-01 00:00:00 UTC`.
@@ -279,13 +325,43 @@ reproduce an older image byte for byte.
 
 Prove it on one machine with `./build repro` (`bin/repro-check.sh`): it rebuilds
 the image under each difference the two hosts have — a forced rebuild in a fresh
-`TMPDIR`, the container's `qemu-i386` toolchain path, `make -j1`, the
-`git archive`d kernel — and builds the ARM server twice, comparing the two
-binaries with each other. It prints one reference sha256 per artifact; the other
-host must print the same numbers. Nix caches each variant, so a second run is
+`TMPDIR`, the `qemu-i386` toolchain path, `make -j1`, the `git archive`d kernel —
+and builds the ARM server twice, comparing the two binaries with each other. It
+prints one reference sha256 per artifact; the same architecture on another
+machine must print the same numbers. Nix caches each variant, so a second run is
 nearly free; `REPRO_FRESH=1 ./build repro` adds `--rebuild` and does the work
 again. On aarch64 the native i686 toolchain cannot execute and `default.nix`
 chooses qemu by itself, so the `qemu-toolchain` variant is a no-op there.
+
+That variant was a no-op *everywhere* until 2026-10-14: it exported
+`NEST_FORCE_QEMU=1`, which nothing reads (`default.nix` reads `NEST_TOOLCHAIN`),
+so it rebuilt the baseline and reported "identical". A variant that cannot
+change anything cannot fail. `NEST_TOOLCHAIN` is what it sets now, and the claim
+it backs was re-measured by hand: an x86_64 host forced through `qemu-i386`
+produces the same `123bd52b0fea…` as the same host running the tools natively.
+
+### Build-host architecture
+
+The build host's architecture is an input to the bytes, and no knob fixes it.
+Measured on 2026-10-14 from the same clean tree (`e5cd8d8`), x86_64 Linux versus
+the aarch64 macOS container:
+
+| Artifact | x86_64 | aarch64 | Difference |
+|---|---|---|---|
+| `nest-ondevice` | `ca738fe2e280d35b…` (804,444 B) | `fd5624aad588866a…` (804,460 B) | rustc 1.99.0 emits one extra `.ARM.exidx` entry; the 16-byte size change shifts every later section, so 85% of bytes differ while the code is the same |
+| `initramfs.cpio` | `23a2c1fe920688da…` | `4517baa6262911e1…` | that binary, plus the installer script's new size rounding the cpio pad by 4 B |
+| `uImage` | `123bd52b0fea6732…` | `498af4439f801882…` | the initramfs above, plus **328 bytes of kernel text**: the 2008 i686 compiler under `qemu-i386` on aarch64 allocates registers differently than the same compiler on x86_64 (168 clusters, all inside the first 0x2246c bytes) |
+
+Both builders are self-consistent — two forced rebuilds on the aarch64 container
+reproduce `498af443…` exactly — so this is not a determinism bug, it is two
+deterministic compilers. The kernel difference is the interesting one: the same
+i686 `gcc` binary, the same `qemu-i386`, the same inputs, different ARM output.
+
+So the rule is: **quote the digest together with the architecture that built
+it**, and build release images on x86_64 Linux. From a Mac that means the ssh
+route above, which is verified to print `123bd52b0fea…` for `uImage`,
+`ca738fe2e280d35b…` for `nest-ondevice` and `23a2c1fe920688da…` for
+`initramfs.cpio` — the same three numbers the x86_64 host prints directly.
 
 What the check does *not* cover is the last mile: the two hosts run different
 `gcc` builds for the **host** tools (x86_64 vs aarch64) and different `xz`/`nix`

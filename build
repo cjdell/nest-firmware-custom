@@ -16,10 +16,13 @@
 # build runs here directly. On macOS it runs inside an Apple-container NixOS
 # VM, because nix on macOS is *-darwin and can never run a Linux builder, while
 # the firmware build needs Linux userland plus the 2008 i686 ARM toolchain.
-# Both paths call the same bin/nix-build.sh, so the artifacts are the same
-# bytes: `./build repro` checks the invariants that make that true (forced
-# rebuild, the container's qemu-i386 toolchain path, -j1, the git-archived
-# kernel) and prints the sha256 to compare against the other machine.
+# Both paths call the same bin/nix-build.sh, so the same host architecture
+# rebuilds the same bytes. They are not the same across architectures: the 2008
+# cross-compiler and rustc both emit different code on aarch64 than on x86_64
+# (firmware/README.md, "Build-host architecture"). `./build repro` checks the
+# invariants that make a host self-consistent (forced rebuild, the qemu-i386
+# toolchain path, -j1, the git-archived kernel) and prints the sha256 to compare
+# against the other machine.
 #
 # Environment:
 #   NEST_ATTACK_DIR   vendored GTVHacker tree        (default ./NestDFUAttack)
@@ -28,6 +31,13 @@
 #                     ./build status (or ./build wait) to collect artifacts
 #   NEST_TOOLCHAIN    auto|native|qemu               (default auto, see firmware/)
 #   NEST_MAKE_JOBS    make -j for the kernel         (default: nix's core count)
+#   NEST_BUILD_HOST   user@host: build on a remote native x86_64 Linux host and
+#                     copy the artifacts back — the canonical image bytes, from
+#                     a Mac that cannot produce them itself
+#   NEST_BUILD_ATTACK path on that host to a NestDFUAttack checkout at the
+#                     pinned commit (required with NEST_BUILD_HOST)
+#   NEST_BUILD_DIR    scratch directory under the remote HOME
+#                     (default nest-mac-build)
 #   NEST_BUILD_TIMESTAMP / NEST_BUILD_USER / NEST_BUILD_HOST
 #                     the build identity baked into vmlinux (already pinned)
 set -eu
@@ -49,6 +59,13 @@ case $os in
     Darwin) via=container ;;
     *) via=native ;;
 esac
+# A remote native x86_64 Linux host overrides both. It is how this Mac gets the
+# canonical image bytes when it cannot compile them itself (aarch64 differs, and
+# an amd64 Apple container runs under Rosetta, which mangles argv[0] — see
+# bin/container.sh and firmware/README.md).
+if [ -n "${NEST_BUILD_HOST:-}" ]; then
+    via=remote
+fi
 
 die() { echo "build: $*" >&2; exit 1; }
 
@@ -66,17 +83,71 @@ need_attack() {
         die "no GTVHacker tree at $attack — run 'git submodule update --init NestDFUAttack' or set NEST_ATTACK_DIR"
 }
 
+# Drive a remote native x86_64 Linux builder and bring the artifacts back. The
+# bytes are that host's, which is the point: they match the reference image.
+# Foreground only — the detached/collect model lives in the container scratch.
+remote_build() {
+    host=$NEST_BUILD_HOST
+    dir=${NEST_BUILD_DIR:-nest-mac-build}
+    attack_remote=${NEST_BUILD_ATTACK:-}
+    [ -n "$attack_remote" ] ||
+        die "NEST_BUILD_HOST needs NEST_BUILD_ATTACK: the path on $host to a NestDFUAttack checkout at the pinned commit (the build reads Dev/linux, the base initramfs and the 2008 toolchain straight out of that tree)"
+
+    # That tree is read as-is, so a stale checkout on the remote silently builds a
+    # different image (trap 22). Compare it against the gitlink before starting.
+    want=$(git -C "$repo" rev-parse HEAD:NestDFUAttack 2>/dev/null || echo unknown)
+    have=$(ssh -o BatchMode=yes "$host" "git -C $attack_remote rev-parse HEAD" 2>/dev/null || echo none)
+    if [ "$want" != "$have" ]; then
+        echo "build: $host:$attack_remote is at ${have:-missing}, this repo pins ${want:-unknown}" >&2
+        echo "build: check it out first:  ssh $host git -C $attack_remote checkout $want" >&2
+        exit 1
+    fi
+
+    rev=$(git -C "$repo" rev-parse HEAD 2>/dev/null || echo unknown)
+    [ -n "$(git -C "$repo" status --porcelain 2>/dev/null)" ] && rev=$rev-dirty
+    echo "build: remote $host:$dir (rev $rev) — the artifact bytes are that host's"
+
+    ssh -o BatchMode=yes "$host" "mkdir -p ~/$dir/out" || exit 1
+    # The submodule and .git stay behind: the remote's pinned checkout supplies
+    # them, and rsyncing a macOS working tree would carry the collapsed case-only
+    # kernel paths across (trap 3).
+    rsync -az --delete --exclude .git --exclude NestDFUAttack --exclude dist \
+        --exclude target --exclude 'result*' "$repo/" "$host:$dir/src/" || exit 1
+
+    # shellcheck disable=SC2029
+    ssh -o BatchMode=yes "$host" "NEST_SRC=\$HOME/$dir/src NEST_OUT=\$HOME/$dir/out \
+        NEST_ATTACK=$attack_remote NEST_HOST_REV=$rev \
+        sh \$HOME/$dir/src/bin/nix-build.sh $*" || exit 1
+
+    # Copy back exactly what the build listed, not everything in the directory:
+    # that directory outlives the build and holds other targets' artifacts.
+    for t in "$@"; do
+        for f in $(ssh -o BatchMode=yes "$host" "cat ~/$dir/out/$t.files 2>/dev/null"); do
+            scp -q -o BatchMode=yes "$host:$dir/out/$f" "$dist/$f" || exit 1
+        done
+        scp -q -o BatchMode=yes "$host:$dir/out/$t.manifest" "$dist/$t.manifest" || exit 1
+    done
+    echo "build: remote artifacts copied into $dist"
+}
+
 # The container keeps its own scratch (staged repo, logs, rc files) and exports
-# finished artifacts; copy them into dist/ so both hosts look the same.
+# finished artifacts; copy them into dist/ so both hosts look the same. Only the
+# files each target listed in <target>.files are copied — that directory is
+# reused across runs and targets, so a blanket copy drops two-day-old artifacts
+# from an earlier build into dist/ beside a fresh uImage.
 collect_from_vm() {
+    [ "$via" = container ] || return 0
     vmout=$(sh "$repo/bin/container.sh" path)
     [ -d "$vmout" ] || return 0
-    for f in "$vmout"/*; do
-        [ -e "$f" ] || continue
-        case $(basename "$f") in
-            *.log | *.rc | *.paths | .*) continue ;;
-        esac
-        cp -f "$f" "$dist/$(basename "$f")"
+    for list in "$vmout"/*.files; do
+        [ -e "$list" ] || continue
+        target=$(basename "$list" .files)
+        for name in $(cat "$list"); do
+            [ -f "$vmout/$name" ] || continue
+            cp -f "$vmout/$name" "$dist/$name"
+        done
+        [ -f "$vmout/$target.manifest" ] &&
+            cp -f "$vmout/$target.manifest" "$dist/$target.manifest"
     done
 }
 
@@ -99,6 +170,11 @@ case ${1:-help} in
         target=$(attr_for "$1") || die "bad target"
         mkdir -p "$dist"
         need_attack
+        if [ "$via" = remote ]; then
+            remote_build "$target"
+            show_dist
+            exit 0
+        fi
         if [ "$via" = native ]; then
             NEST_SRC=$repo NEST_OUT=$dist NEST_ATTACK=$attack \
                 exec sh "$repo/bin/nix-build.sh" "$target"
@@ -114,6 +190,11 @@ case ${1:-help} in
     all)
         mkdir -p "$dist"
         need_attack
+        if [ "$via" = remote ]; then
+            remote_build firmware nest-ondevice initramfs
+            show_dist
+            exit 0
+        fi
         if [ "$via" = native ]; then
             NEST_SRC=$repo NEST_OUT=$dist NEST_ATTACK=$attack \
                 exec sh "$repo/bin/nix-build.sh" firmware nest-ondevice initramfs

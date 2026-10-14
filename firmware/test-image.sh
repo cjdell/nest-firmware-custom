@@ -160,7 +160,9 @@ check_eq "partial root got start line" \
 # installer must not stack a second marker on those lines.
 DONE=$T/done
 make_root "$DONE"
-sed -i "s|\${INITDIR}/nlsleep start|#$MARK \${INITDIR}/nlsleep start|" "$DONE/etc/init.d/rcS"
+sed "s|\${INITDIR}/nlsleep start|#$MARK \${INITDIR}/nlsleep start|" \
+    "$DONE/etc/init.d/rcS" > "$DONE/etc/init.d/rcS.tmp" &&
+    mv "$DONE/etc/init.d/rcS.tmp" "$DONE/etc/init.d/rcS"
 run_installer "$DONE"
 check_eq "pre-disabled line not marked twice" \
     "grep -c \"$MARK.*$MARK\" '$DONE/etc/init.d/rcS'" 0

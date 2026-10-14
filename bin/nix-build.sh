@@ -34,10 +34,31 @@ if [ "$#" -eq 0 ]; then
     set -- firmware
 fi
 
+# Two settings here are load-bearing for reproducibility, and one is an escape
+# hatch:
+#
+# `sandbox = true` is a correctness setting, not a hardening preference. Some
+# images turn the chroot off (docker.io/nixos/nix ships `sandbox = false` in
+# /etc/nix/nix.conf), and an unsandboxed build then runs with the real
+# /nix/store as its build dir instead of /build — enough to change the output of
+# some derivations and to break others outright (rust-std's autoPatchelfHook
+# dies with "No module named 'elftools'", because the env-python in its shebang
+# resolves its prefix through a symlink when it is not in a chroot).
+# Reproducibility needs the same build environment on every host, so ask for the
+# chroot explicitly and fail loudly on a host that cannot provide it.
+#
+# `build-users-group =` because these builders run unprivileged with no nixbld.
+#
+# NEST_NIX_CONFIG_EXTRA lets a caller append options this script cannot know
+# about; bin/container.sh uses it for `filter-syscalls = false`, which the
+# amd64/Rosetta VM needs (nix cannot install its seccomp BPF filter there). That
+# filter is a sandbox, not a build input, so it cannot change output bytes.
 export NIX_CONFIG="experimental-features = nix-command flakes
 ssl-cert-file = /etc/ssl/certs/ca-certificates.crt
 build-users-group =
-keep-derivations = true"
+keep-derivations = true
+sandbox = true
+${NEST_NIX_CONFIG_EXTRA:-}"
 export NEST_ATTACK_DIR=$attack
 export TMPDIR=${TMPDIR:-/tmp}
 
@@ -150,14 +171,40 @@ for target in "$@"; do
         case $f in
             *.sha256) ;;                       # already a checksum
             *)
-                if [ -f "$out/$f" ] && [ ! -f "$out/$f.sha256" ]; then
-                    ( cd "$out" && sha256sum "$f" > "$f.sha256" )
+                # Always rewrite the sidecar: the artifact was just replaced, and
+                # a checksum left over from an older build of the same name is
+                # worse than no checksum — it looks authoritative. Write it via a
+                # rename, because the firmware derivation ships its own
+                # uImage.sha256 straight out of the store, and that copy is
+                # read-only: redirecting into it fails with EACCES.
+                if [ -f "$out/$f" ]; then
+                    (
+                        cd "$out" &&
+                        sha256sum "$f" >"$f.sha256.tmp" &&
+                            chmod 644 "$f.sha256.tmp" &&
+                            mv -f "$f.sha256.tmp" "$f.sha256"
+                    )
                 fi
                 if [ -f "$out/$f.sha256" ]; then cat "$out/$f.sha256"; fi
                 ;;
         esac
     done
     echo "--- ^ sha256 (must match on every build host) ---"
+
+    # Record exactly what this target produced. Whoever copies artifacts out of
+    # a shared build directory (bin/container.sh's caller) uses this list: that
+    # directory also holds every artifact from previous runs of other targets,
+    # and sweeping those into dist/ next to a fresh uImage is how you end up
+    # flashing a two-day-old initramfs alongside a new kernel.
+    {
+        printf '%s\n' $copied
+        for f in $copied; do
+            case $f in
+                *.sha256) ;;
+                *) [ -f "$out/$f.sha256" ] && echo "$f.sha256" ;;
+            esac
+        done
+    } | awk 'NF && !seen[$0]++' > "$out/$target.files"
 done
 
 echo "=== [nix] done — artifacts in $out ==="

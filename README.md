@@ -38,30 +38,54 @@ revision, nix version, store paths) whichever host built it.
 
 ## Reproducible images
 
-The `uImage` is bit-reproducible: the same source produces the same bytes on the
-NixOS box and on the Mac, so "which image is this" is a checksum. The kernel
-links its build identity into vmlinux (banner, `uname -r`) and, with
-`CONFIG_IKCONFIG`, the `.config` text too, so `firmware/default.nix` pins the
-clock, the build user/host, the `.config` stamp and the uImage header time — see
-`firmware/README.md` § "Reproducible images".
+The `uImage` is bit-reproducible **per build-host architecture**: the same source
+produces the same bytes on the same kind of machine, so "which image is this" is
+a checksum. The kernel links its build identity into vmlinux (banner,
+`uname -r`) and, with `CONFIG_IKCONFIG`, the `.config` text too, so
+`firmware/default.nix` pins the clock, the build user/host, the `.config` stamp
+and the uImage header time — see `firmware/README.md` § "Reproducible images".
 
 ```sh
 ./build repro
 # baseline        123bd52b0fea6732…  reference   (the uImage)
 # rebuild         123bd52b0fea6732…  identical   (forced rebuild, fresh TMPDIR)
-# qemu-toolchain  123bd52b0fea6732…  identical   (the container's qemu-i386 path)
+# qemu-toolchain  123bd52b0fea6732…  identical   (i686 tools forced through qemu-i386)
 # jobs1           123bd52b0fea6732…  identical   (make -j1 vs -j32)
 # kernel-git      123bd52b0fea6732…  identical   (kernel via git archive, as on macOS)
 # server-a        ca738fe2e280d35b…  reference   (the Rust binary inside the image)
 # server-b        ca738fe2e280d35b…  identical   (built again, different TMPDIR)
 ```
 
-So after cloning on the Mac, `./build firmware` and compare
-`sha256sum dist/uImage` with the number above (or with the Linux build's):
-`123bd52b0fea673248981f1100eaf576e432894e039f9581bca7fcaa48ea24cf` for this
-revision, and `ca738fe2e280d35be12c1e011fb866b2c7d69d42812ac20f2178a3a440a52ecd`
-for the ARM server binary inside it. `REPRO_FRESH=1 ./build repro` forces the
-rebuilds instead of reusing what nix already has.
+Those are x86_64 digests, and **an Apple-silicon Mac does not print them**. The
+Mac's Linux builder is an arm64 VM, and the compiler is architecture-sensitive:
+the same tree builds `498af4439f801882…` there (328 bytes of kernel text differ,
+and rustc adds one `.ARM.exidx` entry to the server, shifting it by 16 bytes).
+It is deterministic — rebuild it twice and it matches itself — it is simply not
+x86_64's image. `firmware/README.md` § "Build-host architecture" has the
+measurements.
+
+So on the Mac, either accept the arm64 image (fine for development) or build the
+canonical one on a real x86_64 host, which `./build` will drive for you:
+
+```sh
+NEST_BUILD_HOST=user@host NEST_BUILD_ATTACK=~/nest/NestDFUAttack ./build all
+```
+
+A digest belongs to a commit, so these are labelled. `dist/*.manifest` records
+the revision, nix version and store paths of whatever is in `dist/`.
+
+| Built from | Arch | `uImage` | `nest-ondevice` | `initramfs.cpio` |
+|---|---|---|---|---|
+| `e5cd8d8` as committed | x86_64 | `123bd52b0fea6732…` | `ca738fe2e280d35b…` | `23a2c1fe920688da…` |
+| + the `sed -i` fix (trap 28) | x86_64 | `51f54eccfdd5c011…` | `ca738fe2e280d35b…` | `902d1e5fcb942b0e…` |
+| + the same fix | arm64 (Mac) | `4b4fdd025be5bb73…` | `fd5624aad588866a…` | `eba8deca14ac102a…` |
+
+The two x86_64 rows print identically from the x86_64 host directly and from the
+Mac driving it over ssh. The server binary did not change with the installer fix
+(it is not in the installer); the initramfs and image did.
+
+`REPRO_FRESH=1 ./build repro` forces the rebuilds instead of reusing what nix
+already has.
 
 ## Flake outputs (what `./build` calls)
 

@@ -4,8 +4,10 @@
 #
 # You normally do not call this directly. `./build` is the entry point: on Linux
 # it runs bin/nix-build.sh in place, on macOS it dispatches here. Both end up
-# running the *same* build script, which is why the two hosts produce identical
-# images (bin/repro-check.sh proves the parts that differ).
+# running the *same* build script, which is why one host rebuilds the same bytes
+# every time (bin/repro-check.sh proves the parts that differ). "Same script" is
+# not "same image as the other architecture": see the ARCH note below and
+# firmware/README.md, "Build-host architecture".
 #
 # Why a VM at all: nix on macOS is *-darwin, so it can evaluate foreign drvs and
 # substitute cached ones but can never RUN a Linux builder, and the firmware
@@ -28,13 +30,40 @@
 #   TARGET (default firmware) = a packages.<system>.* attribute:
 #   firmware (the uImage), nest-ondevice (the ARM binary), initramfs.
 #
+# ARCH. The default builder is an arm64 VM. An amd64 VM (Rosetta) is available
+# with NEST_VM_ARCH=amd64 and is *not* the default, for two reasons.
+#
+# 1. It does not work. Rosetta-for-Linux does not preserve a custom argv[0]
+#    across exec: `bash -c 'exec -a MARKER bash -c "echo $0"'` prints the
+#    resolved binary path there, and the real name on a native host (arm64
+#    container and x86_64 both preserve it). nixpkgs' python envs are C
+#    trampolines that find their prefix from argv[0], so with Rosetta the
+#    env-python reports the bare interpreter as its prefix and every
+#    autoPatchelfHook dies — the first thing the firmware build hits is
+#    rust-std: "ModuleNotFoundError: No module named 'elftools'". A host that
+#    mangles argv[0] is also a host that can silently change build output, so
+#    it is the wrong place to build a flashable image even if that one build
+#    were patched around. binfmt_misc cannot be mounted in an Apple container
+#    either, so qemu-user x86_64 is not available as a substitute.
+# 2. Host architecture does change the bytes, and no knob fixes it. See
+#    firmware/README.md, "Build-host architecture": the 2008 i686 ARM
+#    cross-compiler under qemu-i386 on aarch64 emits 328 bytes of different ARM
+#    code, and rustc emits one extra .ARM.exidx entry, shifting the server
+#    binary by 16 bytes. Both are deterministic per host — an aarch64 Mac
+#    rebuilds its own bytes forever — they just are not x86_64's bytes. To
+#    produce the canonical x86_64 image from this Mac, build on a real x86_64
+#    Linux host: ./build firmware with NEST_BUILD_HOST set (see below).
+#
 # Overrides:
+#   NEST_VM_ARCH       arm64 (default) | amd64 (Rosetta; see the ARCH note)
 #   NEST_VM_CACHE      ~/.cache/nest-build   (staged repo, VM logs, artifacts)
-#   NEST_VM_CONTAINER  nest-builder          (container name)
-#   NEST_VM_IMAGE      docker.io/rzmapp/nixos-vm:26.05
+#   NEST_VM_CONTAINER  nest-builder-<arch>   (container name)
+#   NEST_VM_IMAGE      rzmapp/nixos-vm:26.05 (arm64) / nixos/nix:2.34.8-amd64
 #   NEST_VM_CPUS       8
 #   NEST_VM_MEMORY     12g
 #   NEST_VM_POLL       5    (seconds between ./build progress polls)
+#   NEST_TOOLCHAIN     auto|native|qemu for the i686 2008 tools (amd64 forces qemu)
+#   NEST_NIX_CONFIG_EXTRA  appended to nix's config inside the VM
 #   NEST_ATTACK_DIR    the vendored NestDFUAttack tree (default ./NestDFUAttack)
 set -eu
 
@@ -43,13 +72,40 @@ cache=${NEST_VM_CACHE:-$HOME/.cache/nest-build}
 src=$cache/src
 out=$cache/out
 certs=$cache/certs
-cname=${NEST_VM_CONTAINER:-nest-builder}
-image=${NEST_VM_IMAGE:-docker.io/rzmapp/nixos-vm:26.05}
 cpus=${NEST_VM_CPUS:-8}
 memory=${NEST_VM_MEMORY:-12g}
 attack=${NEST_ATTACK_DIR:-$repo/NestDFUAttack}
 
 die() { echo "container: $*" >&2; exit 1; }
+
+# Per-arch defaults; see the ARCH note at the top of this file.
+arch=${NEST_VM_ARCH:-arm64}
+case $arch in
+    amd64 | x86_64)
+        arch=amd64
+        image=${NEST_VM_IMAGE:-docker.io/nixos/nix:2.34.8-amd64}
+        # Rosetta translates x86_64 only, so the i686 2008 toolchain can never
+        # exec natively here; firmware/default.nix would pick `native` on
+        # x86_64 by default, so say `qemu` explicitly. Verified to produce the
+        # same bytes as native (firmware/README.md, "Reproducible images").
+        toolchain=${NEST_TOOLCHAIN:-qemu}
+        # nix installs a seccomp BPF filter around every build; the kernel this
+        # container runs under rejects one for a foreign-arch guest, so nix dies
+        # with "unable to load seccomp BPF program: Invalid argument". The
+        # filter is a sandbox, not an input.
+        nix_extra=${NEST_NIX_CONFIG_EXTRA:-filter-syscalls = false}
+        ;;
+    arm64 | aarch64)
+        arch=arm64
+        image=${NEST_VM_IMAGE:-docker.io/rzmapp/nixos-vm:26.05}
+        toolchain=${NEST_TOOLCHAIN:-auto}
+        nix_extra=${NEST_NIX_CONFIG_EXTRA:-}
+        ;;
+    *)
+        die "NEST_VM_ARCH must be amd64 or arm64, got '$arch'"
+        ;;
+esac
+cname=${NEST_VM_CONTAINER:-nest-builder-$arch}
 
 need_container() {
     command -v container >/dev/null 2>&1 ||
@@ -85,14 +141,38 @@ stage() {
 running() { container list --quiet 2>/dev/null | grep -qx "$cname"; }
 exists()  { container list --all --quiet 2>/dev/null | grep -qx "$cname"; }
 
+# virtiofs binds each source path when the container is *created*, and
+# `container create` is skipped whenever the name already exists. A builder
+# left over from another checkout (or from before the cache directory moved)
+# therefore keeps mounting the old directories: the build silently runs on
+# stale sources and exports stale artifacts. Refuse rather than do that.
+assert_mounts() {
+    # container inspect JSON escapes slashes in paths, so strip them (and all
+    # whitespace) before matching a plain host path.
+    cfg=$(container inspect "$cname" 2>/dev/null | tr -d '[:space:]\\')
+    [ -n "$cfg" ] || return 0        # older CLI without inspect: cannot check
+    for want in "$src" "$out" "$attack"; do
+        case $cfg in
+            *"\"source\":\"$want\""*) ;;
+            *)
+                die "$cname was created for a different tree: it does not mount $want.
+         Recreate it: container stop $cname 2>/dev/null; container delete $cname"
+                ;;
+        esac
+    done
+}
+
 ensure_container() {
     need_container
     if exists; then
+        assert_mounts
         running || { echo "container: starting $cname" >&2; container start "$cname" >/dev/null; }
         return
     fi
-    echo "container: creating $cname from $image ($cpus cpus, $memory)" >&2
-    container create --name "$cname" --cpus "$cpus" --memory "$memory" \
+    echo "container: creating $cname from $image ($cpus cpus, $memory, arch $arch)" >&2
+    container image pull --arch "$arch" "$image" >/dev/null 2>&1 ||
+        echo "container: could not pull $image (using a local copy if present)" >&2
+    container create --name "$cname" --arch "$arch" --cpus "$cpus" --memory "$memory" \
         --mount type=virtiofs,source="$src",target=/src,readonly \
         --mount type=virtiofs,source="$out",target=/out \
         --mount type=virtiofs,source="$certs",target=/etc/ssl/certs,readonly \
@@ -129,14 +209,20 @@ start_build() {
         echo "container: case-exact Dev/linux archived -> $linux_tar" >&2
     fi
 
+    # Hand the VM the path *it* sees, not ours: $out is mounted at /out. Passing
+    # the host path makes nix-build.sh fall through to its `git archive` fallback
+    # inside the container, and that cannot work here either — a submodule
+    # checkout's gitdir lives outside the mount, so the archive can only be made
+    # on the host.
     container exec -d "$cname" sh -c \
         "NEST_HOST_REV='$rev' NEST_SRC=/src NEST_OUT=/out NEST_ATTACK=/nest/attack \
-         NEST_LINUX_TAR='$linux_tar' \
+         NEST_LINUX_TAR=${linux_tar:+/out/.attack-linux.tar} NEST_TOOLCHAIN='$toolchain' \
+         NEST_NIX_CONFIG_EXTRA='$nix_extra' \
          sh /src/bin/nix-build.sh $target > /out/$target.log 2>&1; \
          echo \$? > /out/$target.rc" \
         >/dev/null
 
-    echo "container: $target building in $cname (rev ${rev:-unknown})" >&2
+    echo "container: $target building in $cname (rev ${rev:-unknown}, arch $arch, toolchain $toolchain)" >&2
     echo "container: poll with  bash bin/container.sh wait $target" >&2
 }
 
@@ -217,6 +303,6 @@ case ${1:-} in
     exec)   shift; ensure_container; exec container exec "$cname" "$@" ;;
     vm|sh)  ensure_container; exec container exec -it "$cname" sh -l ;;
     stop)   container stop "$cname" 2>/dev/null || true ;;
-    ""|-h|--help|help) sed -n '2,38p' "$0" ;;
+    ""|-h|--help|help) awk 'NR==1 { next } /^set -eu/ { exit } { print }' "$0" ;;
     *)      die "unknown verb '$1' (try: run|start|wait|log|exec|status|path|stage|vm|stop)" ;;
 esac

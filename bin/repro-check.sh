@@ -36,7 +36,11 @@ if [ "${1:-}" = all ]; then shift; fi
 
 mkdir -p "$work"
 export NEST_ATTACK_DIR=$attack
-export NIX_CONFIG="experimental-features = nix-command flakes"
+# `build-users-group =` matters: the macOS build container has no nixbld group,
+# and nix fails outright rather than building unprivileged without this line
+# (bin/nix-build.sh has always carried it).
+export NIX_CONFIG="experimental-features = nix-command flakes
+build-users-group ="
 
 # Same filtered flake source the real builds use (bin/nix-build.sh).
 flake=$(sh "$repo/bin/flake-src.sh" "$repo")
@@ -45,7 +49,12 @@ flake=$(sh "$repo/bin/flake-src.sh" "$repo")
 #   baseline        reference build
 #   rebuild         same build, forced again, in a different TMPDIR
 #   qemu-toolchain  same i686 tools run through qemu-i386 instead of natively —
-#                   the path an aarch64 host or the macOS VM takes
+#                   the path the amd64 build container takes. A no-op on
+#                   aarch64, where default.nix already chose qemu because the
+#                   i686 binaries cannot exec there at all. The variable is
+#                   NEST_TOOLCHAIN, which is what firmware/default.nix reads;
+#                   an earlier name here was never read by anything, so this
+#                   variant rebuilt the baseline and reported "identical".
 #   jobs1           single-job make, to catch parallelism leaking into output
 #   kernel-git      kernel tree extracted with `git archive` (the Mac path)
 #                   rather than `cp -a` (the Linux path)
@@ -56,7 +65,7 @@ variants() {
     cat <<'EOF'
 baseline|firmware|firmware|
 rebuild|firmware|firmware|
-qemu-toolchain|firmware|firmware|NEST_FORCE_QEMU=1
+qemu-toolchain|firmware|firmware|NEST_TOOLCHAIN=qemu
 jobs1|firmware|firmware|NIX_BUILD_OPTIONS=-j1
 kernel-git|firmware|firmware|
 server-a|server|nest-ondevice|

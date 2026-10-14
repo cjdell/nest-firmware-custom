@@ -54,13 +54,17 @@ then `docs/nest-ondevice-protocol-research.md` for the protocol rationale.
 | Cross toolchain `NestDFUAttack/Dev/toolchain/arm-2008q3` is **i686** (32-bit x86) | It cannot run natively on modern hosts. See traps. |
 | `CONFIG_INITRAMFS_SOURCE="../initramfs_data.cpio"` (`gtvhacker_defconfig:81`) | The initramfs is the injection point; the server lands at `/usr/bin/nest-ondevice`. |
 | macOS APFS is **case-insensitive** | The kernel git tree has 13 case-only collisions that get destroyed on checkout. See traps. |
+| The **build host's architecture** is an input to the bytes | Release images are built on x86_64-linux. The Mac's arm64 VM is deterministic but prints a different sha256; an amd64 VM under Rosetta cannot build this at all (traps 23, 25). |
 | macOS `nix` is `*-darwin` | It can evaluate foreign drvs and substitute cached ones but can never **run** a Linux builder. |
 
 ## Build & verify
 
 One entry point, both hosts: `./build` runs nix directly on Linux and drives the
-Apple-container NixOS VM on macOS. Both call the same `bin/nix-build.sh`, and
-the image is **bit-reproducible**, so the two hosts must print the same sha256.
+Apple-container Linux VM on macOS. Both call the same `bin/nix-build.sh`, and the
+image is **bit-reproducible per build-host architecture** — which is *not* the
+same as "the two hosts print the same sha256": the Mac's VM is arm64 and prints
+`498af4439f80…`, while x86_64 prints `123bd52b0fea…`. Trap 23. To get the
+canonical x86_64 image from the Mac, drive an x86_64 host over ssh (below).
 
 ```sh
 git submodule update --init NestDFUAttack   # fresh clone only
@@ -74,6 +78,9 @@ git submodule update --init NestDFUAttack   # fresh clone only
 ./build repro        # rebuild under every host-dependent difference; compare bytes
 ./build status       # dist/ listing + checksums
 ./build shell        # nix develop (cargo + python)
+
+# On a Mac, the canonical x86_64 bytes from an x86_64 host you do not sit at:
+NEST_BUILD_HOST=user@host NEST_BUILD_ATTACK=~/nest/NestDFUAttack ./build all
 ```
 
 Lower level, when you need it:
@@ -100,11 +107,18 @@ SERVER_PORT=18000 CONTROL_PORT=18082 API_ORIGIN=http://127.0.0.1:18000 \
 python3 nest-ondevice-server/test_smoke.py
 ```
 
-**Verified reproducible build (2026-10-14).** Native x86_64-linux
-(`zen3-nixos`), `./build repro`: `uImage` sha256
+**Verified reproducible build (2026-10-14, re-run 2026-10-14 on the Mac).**
+Native x86_64-linux (`zen3-nixos`), `./build repro` — all five variants
+byte-identical, including `qemu-toolchain`, which only became a real variant
+with the trap-24 fix: `uImage` sha256
 `123bd52b0fea673248981f1100eaf576e432894e039f9581bca7fcaa48ea24cf`, 7,298,616
-bytes, ~**30 s** per build with the native
-i686 toolchain (~4 min under `qemu-i386`, which produces the same bytes).
+bytes, ~**30 s** per build with the native i686 toolchain (~2m23s under forced
+`qemu-i386`, which produces **the same bytes** — re-measured, not just asserted).
+The same three digests come back out of `NEST_BUILD_HOST=… ./build all` run on
+the Mac. The Mac's own arm64 container builds `uImage`
+`498af4439f80188229f8fb92e5982203ede791c9cf84b5e26244d6f228588e3f` (7,297,260
+bytes) reproducibly — twice forced, identical — and that is a *different image*,
+not a broken build: trap 23.
 Before the determinism work two builds of the *same* tree on this machine
 differed in 381,517 bytes and in length (the build clock reaches vmlinux via
 `UTS_VERSION` and via the gzip'd `.config` that `CONFIG_IKCONFIG` embeds) — see
@@ -422,6 +436,104 @@ in **`hubitat/README.md`**.
     it in a fork and move the gitlink, or point `NEST_LINUX_DIR` at your own tree
     for a throwaway. A fork was made and dropped for exactly this reason — with
     no delta in it, it only added a place for the build to drift.
+
+23. **The build host's architecture is an input to the image, and no knob fixes
+   it.** Measured 2026-10-14 from one clean tree (`e5cd8d8`), x86_64 Linux versus
+   the aarch64 macOS container: the 2008 i686 ARM compiler running under
+   `qemu-i386` **on aarch64** emits 328 bytes of different ARM code (168 clusters,
+   all inside the first 0x2246c bytes — register-list and opcode bytes) than the
+   same compiler on x86_64, and rustc 1.99.0 on aarch64 emits one extra
+   `.ARM.exidx` entry, making the server 16 bytes longer and shifting every
+   section after it (so 85% of its bytes differ while the code is the same),
+   which also rounds the cpio pad by 4 bytes. Both builders are self-consistent —
+   two forced rebuilds on the aarch64 container reproduce `498af443…` exactly —
+   so this is two deterministic compilers, not a determinism bug. **x86_64-linux
+   is the reference**: quote a digest together with the architecture that built
+   it, and build release images there. From a Mac that means `NEST_BUILD_HOST`
+   (see "Build & verify"), verified to print `123bd52b0fea…` / `ca738fe2e280…` /
+   `23a2c1fe9206…` exactly as the x86_64 host does directly. Do not "fix" this by
+   comparing the two and calling one wrong.
+
+24. **`bin/repro-check.sh` exported an environment variable nothing read, so its
+   `qemu-toolchain` variant rebuilt the baseline and reported "identical".** It
+   set `NEST_FORCE_QEMU=1`; `firmware/default.nix` reads `NEST_TOOLCHAIN`. Proof:
+   `nix eval …firmware.drvPath` gives `y2qwdrdg…` for unset, `native` **and**
+   `NEST_FORCE_QEMU=1`, and a different `yg3idxsf…` for `NEST_TOOLCHAIN=qemu`.
+   A variant that cannot change the derivation cannot fail, and the README claim
+   it backed ("native and qemu-i386 produce the same bytes") had never been
+   tested. Now fixed and actually measured: x86_64 forced through `qemu-i386`
+   builds the same `123bd52b0fea…` as x86_64 running the tools natively.
+   Same file, second bug: its `NIX_CONFIG` lacked `build-users-group =`, which
+   `bin/nix-build.sh` has always carried, so `./build repro` inside the macOS
+   container died with `the group 'nixbld' … does not exist`.
+
+25. **Rosetta is not a Linux build host for nixpkgs, so an amd64 Apple container
+   cannot build this image.** Rosetta-for-Linux does not preserve a custom
+   `argv[0]` across `exec`: `bash -c 'exec -a MARKER bash -c "echo $0"'` prints
+   the resolved binary path under Rosetta and `MARKER` on native arm64 and native
+   x86_64. nixpkgs python environments are C trampolines that find their prefix
+   from `argv[0]`, so the env-python reports the bare interpreter as its prefix
+   and every `autoPatchelfHook` fails — the firmware build hits it first on
+   `rust-std` (`ModuleNotFoundError: No module named 'elftools'`, then
+   `patchelf: wrong ELF type`). Worse than failing: a host that rewrites `argv[0]`
+   can change build output silently. `binfmt_misc` cannot be mounted in an Apple
+   container (`mount: /proc/sys/fs/binfmt_misc: permission denied`), so
+   `qemu-x86_64` user emulation is not an alternative either. Related, and not
+   architecture-related: **`sandbox = true` is a correctness setting.**
+   `docker.io/nixos/nix` ships `/etc/nix/nix.conf` with `sandbox = false`, and an
+   unsandboxed build runs with the real `/nix/store` as its build dir instead of
+   `/build`, which breaks `rust-std` the same way. `bin/nix-build.sh` now pins
+   `sandbox = true` rather than trusting the image. (Under Rosetta nix also needs
+   `filter-syscalls = false`: it cannot install its seccomp BPF filter —
+   `unable to load seccomp BPF program: Invalid argument`.)
+
+26. **A container's virtiofs mounts are frozen when it is created, and
+   `container create` is skipped if the name already exists.** A builder left
+   over from another checkout — or from before `NEST_VM_CACHE` moved — keeps
+   mounting the old directories: the build runs on stale sources, writes into
+   host directories that no longer exist, and still reports success. `bin/
+   container.sh` now `assert_mounts` before use and dies with the recreate
+   command. Second, related: `NEST_LINUX_TAR` must name the path **the VM sees**
+   (`/out/.attack-linux.tar`), not the host's. If it does not exist inside the
+   VM, `bin/nix-build.sh` falls back to `git archive` there, which cannot work
+   either — an absorbed submodule's gitdir lives outside the mount, so only the
+   host can produce the case-exact archive (trap 3). Symptom:
+   `fatal: not a git repository: /nest/attack/../.git/modules/NestDFUAttack`
+   followed by `does not look like a tar archive`.
+
+27. **`dist/` swept everything in the VM's output directory, so two-day-old
+   artifacts landed next to a fresh `uImage`.** That directory is shared by all
+   targets and all runs, so `./build firmware` re-collected an `initramfs.cpio`
+   from a previous `./build all` — and an image is kernel + initramfs together,
+   so flashing that pair is exactly the bug reproducibility exists to prevent.
+   `bin/nix-build.sh` now writes `<target>.files` (exactly what it produced,
+   including sidecars) and both collectors use it. While in there: the firmware
+   derivation ships its own read-only `uImage.sha256` out of the store, so
+   rewriting a sidecar must go through a rename — redirecting into it is
+   `EACCES`.
+
+28. **`sed -i` is a GNU-ism, and it was silently doing nothing in the flash-root
+   installer.** `firmware/rootfs-install.sh` removed the rcS-blocking
+   `sshconnect` line with `sed -i '/\/bin\/sshconnect/d' "$RCS"`. BSD sed reads
+   the option differently — it takes the next argument as the *backup suffix* and
+   then treats the **file** as the script — so on a Mac the run dies with
+   `sed: 1: "/var/folders/…": invalid command code f` and the file is left
+   untouched. `./firmware/test-image.sh` runs on the host, so `./build test` was
+   failing two checks on macOS before anything else was even tried (it reported
+   65 passed / 2 failed on a clean `e5cd8d8` tree — the "green" claim did not hold
+   there). Both `sed -i` uses are now edits through a temporary plus `mv`, which
+   is also what the dropbear de-dupe two lines below already did.
+   **Why it matters beyond the test:** this script runs on the thermostat, whose
+   root is a 2013 rootfs (`/bin/busybox` is 1.19.3, and `Dev/root/bin/busybox2`
+   is 1.22.1), and `sed -i` is not old-busybox syntax either — so the trap 11 fix
+   may never have taken effect on a fresh flash. Not verified on hardware: the
+   unit was unreachable and the vendored busybox is dynamically linked against a
+   loader that lives on the flash root, not in the repo, so it could not be run
+   under qemu. Treat "the installer removes the sshconnect line" as unproven on
+   device until the next flash, when `grep -c sshconnect /etc/init.d/rcS` on the
+   flash root should print 0. Any change to `firmware/rootfs-install.sh` also
+   changes `initramfs.cpio` and therefore `uImage` — the digests in this repo are
+   per-commit for exactly that reason.
 
 ## Layout
 
