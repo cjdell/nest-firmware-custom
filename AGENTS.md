@@ -38,6 +38,7 @@ then `docs/nest-ondevice-protocol-research.md` for the protocol rationale.
 
 | Topic | File |
 |---|---|
+| **Every common command (build, deploy, flash staging, logs, hub push)** | `justfile` — `just --list` |
 | Protocol, bucket semantics, Option A rationale | `docs/nest-ondevice-protocol-research.md` |
 | **On-device observability (`/debug/*`, syslog, monit, Dropbear, UART)** | `firmware/README.md` § "Observability on the device" + `nest-ondevice-server/README.md` § "/debug/*" |
 | **Hubitat: the Groovy we run + install/REST procedures (driver fixes, endpoints, rename)** | `hubitat/` (`apps/`, `drivers/`, `push.sh`) + `hubitat/README.md` |
@@ -77,9 +78,13 @@ git submodule update --init NestDFUAttack   # fresh clone only
 ./build qemu         # boot under qemu-system-arm (RealView PB-A8), assert HTTP
 ./build test         # the on-device half of the image, against fixtures
 ./build ui           # rebuild the schedule SPA bundle (Bun) + its render test
+./build ui-dev       # SPA dev server on a fake control API (no thermostat)
 ./build repro        # rebuild under every host-dependent difference; compare bytes
 ./build status       # dist/ listing + checksums
 ./build shell        # nix develop (cargo + python)
+
+# Day-to-day wrapper, `just --list`: the verbs above plus the non-build half —
+# just deploy / nssh / logs / flash_stage / flash_check / hub_push / smoke / doctor
 
 # On a Mac, the canonical x86_64 bytes from an x86_64 host you do not sit at:
 NEST_BUILD_HOST=user@host NEST_BUILD_ATTACK=~/nest/NestDFUAttack ./build all
@@ -581,6 +586,37 @@ in **`hubitat/README.md`**.
     `hubitat/` Groovy (trap 19). Edit `ui/src/`, run `./build ui`, commit `src/`
     and `dist/` together.
 
+31. **`bin/flake-src.sh` filtered paths by *basename*, so it deleted the tracked
+    `ui/dist` and broke `./build firmware`.** The symptom is an evaluation error
+    from the firmware derivation — *`lib.fileset.unions: Element 4
+    (…/nest-ondevice-server/ui/dist) is a path that does not exist`* — while
+    `nix build .#firmware` **works**, because only `./build` (and
+    `bin/repro-check.sh`) go through the filtered source; the flake's own `self`
+    copy keeps tracked files. `dist` was in the basename list to drop the 900 MB
+    of artifacts `./build` writes at the repo root, and it also matched
+    `nest-ondevice-server/ui/dist`. Fix: root-anchor that one exclusion
+    (`p == "$src/dist"`) and leave the rest as basenames. Two lessons: a basename
+    filter is a footgun the moment a tracked directory shares a name with an
+    artifact directory, and the two entry paths disagree, so **verify firmware
+    builds through `./build`, not through `nix build`** (found by
+    `just flash_stage`, not by `./build ui`).
+
+32. **`justfile` gotchas, so the next edit does not undo these.** (a) just
+    evaluates **variables eagerly**, so anything expensive — the
+    `nix build nixpkgs#sshpass` fallback — lives inside the recipe that needs it
+    (`sshpass_sh` is a string spliced into the script, not a command
+    substitution). (b) **User-defined functions are still unstable** in just
+    1.58, so `ctl(path)`/`nssh_cmd(cmd)` became plain concatenated variables
+    (`url_status`, `base`); same reason `just_cwd()` does not exist
+    (`justfile_directory()` does). (c) `--list` prints the **last** comment line
+    above a recipe, so the one-line summary goes last and the receipts above it.
+    (d) `[group(…)]` must sit *directly* above the recipe — a comment between the
+    attribute and the recipe is `extraneous attribute`, and a blank line between
+    them is the same. (e) Backtick variables cannot take methods
+    (`` `cmd`.trim() `` is a parse error), so keep their output to one line.
+    (f) `sed 's|$|/bin/sshpass'` is missing its closing delimiter — GNU sed says
+    `unterminated 's' command`, and every device recipe dies confusingly.
+
 ## Layout
 
 ```
@@ -600,6 +636,7 @@ firmware/
 nest-ondevice-server/         Rust server (src/, Cargo.*, test_smoke.py, deploy/)
   build.rs                    embeds ui/dist into the binary (missing ui/ is not an error)
   ui/                         schedule editor SPA: Solid.js + TS, built by Bun (./build ui)
+                              dev.ts + mock.ts = the same app on a fake API (./build ui-dev)
     src/, test/render.tsx     source + happy-dom render test
     dist/                     the committed bundle that gets embedded (trap 30)
     README.md                 wire format, build/test, what is unproven (trap 29)
@@ -610,6 +647,7 @@ hubitat/
   README.md                   hub deployment facts + reverse-engineered hub REST API
 docs/nest-ondevice-protocol-research.md
 build                         THE build command (dispatches native vs container)
+justfile                      self-describing wrapper over ./build + device/hub ops
 bin/
   nix-build.sh                the real build: nix + artifacts + manifest (both hosts)
   container.sh                Apple-container NixOS VM lifecycle (macOS builder)

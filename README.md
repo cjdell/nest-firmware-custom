@@ -30,6 +30,7 @@ git submodule update --init NestDFUAttack   # fresh clone only
 ./build qemu         # boot the image under qemu-system-arm, assert HTTP works
 ./build test         # the on-device half of the image, against fixtures
 ./build ui           # rebuild the schedule SPA bundle (Bun) + its render test
+./build ui-dev       # SPA dev server on a fake control API (no thermostat)
 ./build repro        # prove the image is host-independent (see below)
 ./build status       # dist/ listing + checksums
 ./build shell        # nix develop (cargo + python for the server)
@@ -37,6 +38,23 @@ git submodule update --init NestDFUAttack   # fresh clone only
 
 Every artifact lands in `dist/` with a `.sha256` and a `.manifest` (source
 revision, nix version, store paths) whichever host built it.
+
+Beyond those verbs there is `just`, which wraps them and adds the things that are
+not builds — pushing a binary to the unit, reading its logs, staging a flash,
+pushing the Hubitat Groovy:
+
+```sh
+just                 # list every recipe, grouped, with a one-line summary
+just deploy          # ./build server, stream it to the unit, restart the daemon
+just flash_stage     # stage x-load/u-boot/uImage for the DFU loader + print it
+just smoke           # host build + the 32-check protocol smoke test
+just doctor          # what this host can do, and whether the unit is answering
+```
+
+`just` never rebuilds what `./build` would not, and it never writes inside
+`NestDFUAttack/` (AGENTS.md trap 22): the DFU staging copy goes to
+`/tmp/nest-flash`. Hosts and credentials are variables at the top of the
+`justfile` (`NEST_HOST`, `HUBITAT_HOST`, `NEST_PASS`, `NEST_SERIAL`).
 
 ## Reproducible images
 
