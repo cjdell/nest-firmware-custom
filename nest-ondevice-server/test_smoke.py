@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """End-to-end smoke test for the Rust on-device Nest server."""
-import base64, json, socket, threading, time, urllib.request
+import base64, json, socket, threading, time, urllib.request, urllib.error
 
 DEV = "127.0.0.1:18000"
 CTL = "127.0.0.1:18082"
@@ -18,8 +18,12 @@ def req(port, method, path, body=None, chunked=False, timeout=10):
     r.add_header("Authorization", auth())
     if data:
         r.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(r, timeout=timeout) as resp:
-        return resp.status, resp.read().decode(), dict(resp.headers)
+    try:
+        with urllib.request.urlopen(r, timeout=timeout) as resp:
+            return resp.status, resp.read().decode(), dict(resp.headers)
+    except urllib.error.HTTPError as e:
+        # A 4xx from the control API is a result we assert on, not an exception.
+        return e.code, e.read().decode(), dict(e.headers)
 
 
 def check(name, cond):
@@ -141,5 +145,108 @@ st, body, _ = req(CTL, "POST", "/debug/loglevel?level=3")
 check("debug loglevel", st == 200 and json.loads(body)["level"] == 3)
 st, body, _ = req(CTL, "GET", "/debug/state")
 check("debug state lists serial", any(d["serial"] == SERIAL for d in json.loads(body)["devices"]))
+
+# 9. schedule: the device publishes its own bucket, the SPA/API round-trips it
+SCHED_KEY = f"schedule.{SERIAL}"
+sched_obj = {
+    "object_key": SCHED_KEY, "object_revision": 0, "object_timestamp": 0,
+    "value": {"ver": 2, "name": "", "schedule_mode": "HEAT",
+              "schedule_algorithm": "PROGRAM",
+              "days": {"0": {"0": {"time": 23400, "type": "HEAT", "temp": 20.0, "entry_type": "setpoint"},
+                              "1": {"time": 32400, "type": "HEAT", "temp": 16.0, "entry_type": "setpoint"}}}},
+}
+st, body, _ = req(DEV, "POST", "/nest/transport/put", {"session": "s1", "objects": [sched_obj]})
+check("schedule put accepted", st == 200)
+st, body, _ = req(CTL, "GET", f"/api/schedule?serial={SERIAL}")
+sched = json.loads(body)
+check("api/schedule returns the device's dict-of-dicts", sched["schedule"]["days"]["0"]["1"]["time"] == 32400)
+rev0 = sched["object_revision"]
+
+# A held long-poll, so we can see the schedule actually reach the device.
+sched_push = {}
+
+def held_schedule():
+    s = socket.create_connection(("127.0.0.1", 18000), timeout=20)
+    payload = json.dumps({"chunked": True, "session": "s3",
+                          SCHED_KEY: {"object_key": SCHED_KEY,
+                                      "object_revision": 1, "object_timestamp": 1}}).encode()
+    s.sendall((f"POST /nest/transport HTTP/1.1\r\nHost: x\r\nAuthorization: {auth()}\r\n"
+               f"Content-Type: application/json\r\nContent-Length: {len(payload)}\r\n\r\n").encode() + payload)
+    buf = b""
+    while b"\r\n\r\n" not in buf:
+        buf += s.recv(4096)
+    head, rest = buf.split(b"\r\n\r\n", 1)
+    sched_push["headers"] = head.decode()
+    objs = []
+    deadline = time.time() + 12
+    while time.time() < deadline:
+        while b"\r\n" not in rest:
+            rest += s.recv(4096)
+        size_line, rest = rest.split(b"\r\n", 1)
+        size = int(size_line, 16)
+        if size == 0:
+            break
+        while len(rest) < size + 2:
+            rest += s.recv(4096)
+        objs.extend(json.loads(rest[:size].decode()).get("objects", []))
+        rest = rest[size + 2:]
+        if any(o["object_key"] == SCHED_KEY and o.get("value", {}).get("days", {}).get("6") for o in objs):
+            break
+    sched_push["objects"] = objs
+    s.close()
+
+t2 = threading.Thread(target=held_schedule, daemon=True)
+t2.start()
+time.sleep(0.6)
+st, body, _ = req(CTL, "POST", "/command", {"serial": SERIAL, "command": "set_schedule", "value": {
+    "ver": 2, "name": "", "schedule_mode": "HEAT", "schedule_algorithm": "PROGRAM",
+    "days": {"0": [{"time": 21600, "type": "HEAT", "temp": 21.0, "entry_type": "setpoint"}],
+             "6": [{"time": 28800, "type": "HEAT", "temp": 19.0, "entry_type": "setpoint"}]}}})
+res = json.loads(body)
+check("set_schedule accepted", st == 200 and res["success"])
+check("set_schedule writes the schedule bucket", res["data"]["object_key"] == SCHED_KEY)
+t2.join(timeout=15)
+pushed = [o for o in sched_push.get("objects", []) if o["object_key"] == SCHED_KEY]
+check("schedule pushed down the long-poll", bool(pushed))
+check("push carries the new days", pushed and pushed[-1]["value"]["days"]["6"][0]["temp"] == 19.0)
+check("push keeps field order the device needs",
+      bool(pushed) and json.dumps(pushed[-1]).index("object_revision")
+      < json.dumps(pushed[-1]).index("object_key"))
+
+st, body, _ = req(CTL, "GET", f"/api/schedule?serial={SERIAL}")
+after = json.loads(body)
+check("schedule bucket replaced", after["schedule"]["days"]["6"][0]["temp"] == 19.0)
+check("schedule revision bumped", after["object_revision"] == rev0 + 1)
+check("unknown top-level field preserved", after["schedule"].get("schedule_algorithm") == "PROGRAM")
+check("entry_type round-trips", after["schedule"]["days"]["0"][0]["entry_type"] == "setpoint")
+
+
+def try_schedule(days):
+    return req(CTL, "POST", "/command", {"serial": SERIAL, "command": "set_schedule",
+                                         "value": {"ver": 2, "schedule_mode": "HEAT", "days": days}})
+
+
+st, body, _ = try_schedule({"0": [{"time": 100, "type": "HEAT", "temp": 99.0}]})
+check("rejects temp above 32C", st == 400 and "outside" in json.loads(body)["message"])
+st, body, _ = try_schedule({"7": []})
+check("rejects day key outside 0-6", st == 400)
+st, body, _ = try_schedule({"0": [{"type": "HEAT", "temp": 20.0}]})
+check("rejects entry without time", st == 400)
+st, body, _ = try_schedule({"0": [{"time": 0, "type": "RANGE", "temp-min": 18.0}]})
+check("rejects RANGE without temp-max", st == 400)
+st, body, _ = try_schedule({"0": [{"time": 0, "type": "HEAT", "temp": 20.0, "entry_type": "setpoint"},
+                                  {"time": 3600, "type": "HEAT", "entry_type": "continuation"}]})
+check("accepts a device continuation entry", json.loads(body)["success"])
+
+# 10. the embedded schedule SPA (ui/, compiled by Bun, embedded by build.rs)
+st, body, hdrs = req(CTL, "GET", "/")
+check("SPA index served", st == 200 and 'id="app"' in body)
+check("SPA index content type", "text/html" in hdrs.get("Content-Type", ""))
+st, body, hdrs = req(CTL, "GET", "/index.js")
+check("SPA bundle served", st == 200 and "text/javascript" in hdrs.get("Content-Type", "") and len(body) > 1000)
+st, body, hdrs = req(CTL, "GET", "/app.css")
+check("SPA stylesheet served", st == 200 and "text/css" in hdrs.get("Content-Type", ""))
+st, body, _ = req(DEV, "GET", "/nest/entry")
+check("SPA does not shadow the protocol", json.loads(body)["transport_url"].endswith("/nest/transport"))
 
 print("\nALL TESTS PASSED")

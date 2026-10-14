@@ -5,6 +5,7 @@
 #   ./build server       # the ARM server binary    -> dist/nest-ondevice
 #   ./build initramfs    # patched initramfs cpio   -> dist/initramfs.cpio
 #   ./build all          # firmware + server + initramfs
+#   ./build ui           # rebuild the schedule SPA bundle -> ui/dist (needs Bun)
 #   ./build qemu         # boot the image under qemu-system-arm, assert HTTP works
 #   ./build test         # the on-device half of the image, against fixtures
 #   ./build repro        # prove the image is host-independent (see below)
@@ -218,6 +219,25 @@ case ${1:-help} in
         sh "$repo/bin/container.sh" wait "$target" || exit 1
         collect_from_vm
         show_dist
+        ;;
+
+    ui)
+        # The schedule SPA (nest-ondevice-server/ui). Bun compiles src/ into
+        # ui/dist, which build.rs embeds into the server binary. Deliberately
+        # outside the nix build — there is no Bun in the firmware derivation and
+        # the committed bundle keeps the image reproducible, the same way the
+        # vendored hubitat/ Groovy is pushed rather than built.
+        uidir=$repo/nest-ondevice-server/ui
+        bunbin=$uidir/node_modules/.bin/bun
+        [ -x "$bunbin" ] || bunbin=$(command -v bun || true)
+        [ -n "$bunbin" ] || die "bun not found: install it (https://bun.sh), or npm i -D bun in $uidir"
+        if [ ! -d "$uidir/node_modules" ]; then
+            echo "ui: installing dependencies (npm ci)"
+            (cd "$uidir" && npm ci) || die "npm ci failed"
+        fi
+        (cd "$uidir" && "$bunbin" run build.ts) || die "ui build failed"
+        (cd "$uidir" && "$bunbin" run test/run.ts) || die "ui render test failed"
+        echo "ui: ui/dist rebuilt — rebuild the server to embed it (./build server)"
         ;;
 
     qemu)

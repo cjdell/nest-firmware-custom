@@ -18,3 +18,8 @@
 # Python bytecode from the firmware helper scripts
 __pycache__/
 *.pyc
+
+# The schedule SPA's dependencies and test scratch. ui/dist IS tracked: it is
+# embedded into the binary at compile time and the nix build has no Bun.
+node_modules/
+/nest-ondevice-server/ui/test/.out/

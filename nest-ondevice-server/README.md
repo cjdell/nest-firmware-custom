@@ -63,7 +63,8 @@ same routes, so a single port also works):
 | `POST /command` | `set_temperature`, `set_mode`, `set_away`, `set_fan`, `set_eco_temperatures`, `set_schedule`, `set_schedule_mode`, `set_device_setting` |
 | `GET /status?serial=` | full device status (Hubitat shape) |
 | `GET /api/devices` | device list with `subscription_count` |
-| `GET /api/schedule?serial=` | weekly schedule |
+| `GET /api/schedule?serial=` | weekly schedule (the `schedule.<serial>` bucket) |
+| `GET /`, `/index.js`, `/app.css` | the schedule editor SPA, embedded at compile time (`ui/`) |
 | `POST /notify-device` | force push current state |
 | `GET /api/config`, `/api/stats`, `/health` | diagnostics |
 | `POST /api/register`, `GET /api/registered-devices`, `POST /api/ensure-user` | registration |
@@ -176,10 +177,42 @@ chunked subscribe receiving a command push, status/devices/command on the
 control API, and the `/debug/*` surface (status/logs/trace/report/loglevel/state,
 including a check that the auth password never leaks into a trace).
 
+## Schedule editing
+
+The thermostat's weekly program lives in the cloud bucket `schedule.<serial>`,
+which this server owns — so editing it is a bucket write, and pushing it is the
+same long-poll push that already moves `set_temperature`.
+
+```sh
+curl -s "http://192.168.1.2:8082/api/schedule?serial=02AA01AC2614065C" | python3 -m json.tool
+curl -s -X POST http://192.168.1.2:8082/command -H 'Content-Type: application/json' -d '{
+  "serial": "02AA01AC2614065C", "command": "set_schedule", "value": {
+    "ver": 2, "name": "", "schedule_mode": "HEAT",
+    "days": { "0": { "0": { "time": 23400, "type": "HEAT", "temp": 20.5, "entry_type": "setpoint" } } } } }'
+```
+
+`ver` must be 2, day keys are `"0"`–`"6"` with **0 = Monday**, `time` is seconds
+since local midnight, `type` is `HEAT`/`COOL`/`RANGE`, temperatures are **Celsius**
+(4.5–32) whatever the dial shows, and `RANGE` uses `temp-min`/`temp-max`. A day
+may be a dict keyed by position (what the device writes) or an array (what the
+SPA and upstream's dashboard use); both are accepted. `cmd_set_schedule` validates
+every entry the way upstream does, but — unlike upstream — it **keeps** the
+top-level fields it does not model (`schedule_algorithm`, `preconditioning`,
+`created_at`, …): nlclient is the consumer of this bucket and we do not know
+which of them it needs. `entry_type: "continuation"` entries carry no temperature
+and are never given one.
+
+The editor itself is a Solid.js + TypeScript SPA built by Bun and embedded in the
+binary — see [`ui/README.md`](ui/README.md) for the build, the data model and what
+is still unproven about device adoption.
+
 ## Caveats
 
 * **Sunset path:** the on-device scheduler/learning in `nlclient` is proprietary
   and still authoritative; this server only speaks the transport/control surface.
+  Writing `schedule.<serial>` is accepted, pushed and stored — whether the dial
+  then *follows* it is the open question in `AGENTS.md` trap 29, and learning
+  mode on the device will rewrite the bucket behind us either way.
 * **Timing** defaults to `suspend_time_max=300`, `connection_hold_timeout=290`,
   matching the reference server (must stay under the WiFi keepalive constraint).
 * **Weather** returns `{}` rather than proxying `weather.nest.com` (no TLS in

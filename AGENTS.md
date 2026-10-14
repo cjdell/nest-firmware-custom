@@ -42,6 +42,7 @@ then `docs/nest-ondevice-protocol-research.md` for the protocol rationale.
 | **On-device observability (`/debug/*`, syslog, monit, Dropbear, UART)** | `firmware/README.md` § "Observability on the device" + `nest-ondevice-server/README.md` § "/debug/*" |
 | **Hubitat: the Groovy we run + install/REST procedures (driver fixes, endpoints, rename)** | `hubitat/` (`apps/`, `drivers/`, `push.sh`) + `hubitat/README.md` |
 | Server behaviour / control API / flashing-lite notes | `nest-ondevice-server/README.md` |
+| **Schedule format + the schedule editor SPA** | `nest-ondevice-server/ui/README.md` (+ trap 29) |
 | **Firmware build constraints + traps + verification** | `firmware/README.md` |
 | Top-level build/entry points | `README.md` |
 
@@ -75,6 +76,7 @@ git submodule update --init NestDFUAttack   # fresh clone only
 ./build all          # all three
 ./build qemu         # boot under qemu-system-arm (RealView PB-A8), assert HTTP
 ./build test         # the on-device half of the image, against fixtures
+./build ui           # rebuild the schedule SPA bundle (Bun) + its render test
 ./build repro        # rebuild under every host-dependent difference; compare bytes
 ./build status       # dist/ listing + checksums
 ./build shell        # nix develop (cargo + python)
@@ -535,6 +537,50 @@ in **`hubitat/README.md`**.
    changes `initramfs.cpio` and therefore `uImage` — the digests in this repo are
    per-commit for exactly that reason.
 
+29. **Schedule editing: the write path is proven, the dial following it is not.**
+    The weekly program is the `schedule.<serial>` bucket, which this server owns,
+    so `POST /command {command:"set_schedule"}` replaces it and pushes it down the
+    held long-poll — `test_smoke.py` asserts the replacement, the revision bump,
+    the push, and that the push keeps `object_revision`/`object_timestamp` before
+    `object_key` (upstream `transport.py:215-217`: wrong order and "the device may
+    not apply them correctly"). Wire format: `ver:2`, day keys `"0"`–`"6"` with
+    **0 = Monday**, `time` = seconds since local midnight, `type` =
+    `HEAT`/`COOL`/`RANGE`, temperatures **always Celsius** (4.5–32), `RANGE` uses
+    `temp-min`/`temp-max`, a day is a dict keyed by position (device-native) or an
+    array, and `entry_type:"continuation"` entries carry **no** temperature — never
+    invent one. Three ways this silently undoes itself, none of them visible in the
+    API: (a) **the device wins any timestamp race** — a later device PUT of
+    `schedule.<serial>` shallow-merges over our bucket (`nest.rs` `to_merge`,
+    `transport.py:512-533`; comparison is timestamp-only, no revision tiebreaker),
+    so the dial re-publishing its own copy erases ours; (b) **learning mode** makes
+    the dial invent setpoints after a manual adjustment (the community workaround is
+    to re-clear the schedule on every poll; the Homebridge plugin turns learning off
+    instead) — the SPA exposes the switch, `set_device_setting {learning_mode:false}`;
+    (c) the dial **regenerates the bucket on HVAC mode change**, which is why
+    upstream's editor refuses to render until `schedule_mode` matches the device
+    mode (we warn instead of blocking). Evidence that a pushed schedule is applied
+    at all is circumstantial but strong: upstream's four Feb-2026 PUT fixes exist
+    only to stop the server "overriding the device's schedule-derived setpoint",
+    and its MQTT helper notes "the firmware's schedule preconditioning reverts
+    auto-eco" — the on-device schedule engine demonstrably acts on schedule state.
+    **Settle it on hardware** (10 min, needs the unit reachable): write a HEAT
+    schedule whose next slot is +6 °C off the current target, then watch
+    `GET /api/schedule` `object_revision` (does it move without you saving?),
+    `/debug/trace` (does the device's next subscribe carry *our* timestamp or its
+    own?), and `/status target_temperature` across the slot boundary. Repeat with
+    the byte-exact bucket the device itself PUT (capture with `/debug/state`) to
+    separate "device rejects foreign payloads" from "device overwrote us".
+
+30. **Nix flakes only see git-tracked files, so a new build input must be
+    `git add`ed before `nix build` can find it.** Adding `build.rs` to
+    `serverSrc`'s `lib.fileset.unions` failed with *"Element 2 (…/build.rs) is a
+    path that does not exist"* while the file sat untracked in the working tree.
+    Related, and deliberate: `ui/dist` (the compiled schedule SPA) is **committed**
+    and listed in `serverSrc`, because there is no Bun in the firmware derivation
+    and the image must stay reproducible — same reasoning as the vendored
+    `hubitat/` Groovy (trap 19). Edit `ui/src/`, run `./build ui`, commit `src/`
+    and `dist/` together.
+
 ## Layout
 
 ```
@@ -552,6 +598,11 @@ firmware/
   qemu.nix, qemu-init.sh, inject_qemu_init.py, qemu-smoke.sh   RealView PB-A8 smoke test
   README.md                   constraints/traps/verify (the long form of this file)
 nest-ondevice-server/         Rust server (src/, Cargo.*, test_smoke.py, deploy/)
+  build.rs                    embeds ui/dist into the binary (missing ui/ is not an error)
+  ui/                         schedule editor SPA: Solid.js + TS, built by Bun (./build ui)
+    src/, test/render.tsx     source + happy-dom render test
+    dist/                     the committed bundle that gets embedded (trap 30)
+    README.md                 wire format, build/test, what is unproven (trap 29)
 hubitat/
   apps/, drivers/             Hubitat Groovy we run (vendored from upstream + patched)
   push.sh                     push them to the hub (app 210 / driver 940) over REST
@@ -584,6 +635,13 @@ bin/
   thermostat device id 16 (label `Hallway Thermostat`) talks to
   `http://192.168.1.2:8082`; bidirectional control verified. Procedures and the
   driver GString fix are in `hubitat/README.md`.
+* **Schedule editor — built, not yet proven on the dial (2026-10-14).** The SPA
+  (`nest-ondevice-server/ui/`) and the server half are done and tested: the
+  bucket is replaced, the revision bumps and the new days are pushed down the
+  held long-poll. What has never been watched is the thermostat *following* a
+  schedule it did not write. Trap 29 has the 10-minute experiment; it needs the
+  unit at `192.168.1.2` reachable (this build host is on `192.168.49.0/24`, so it
+  could not be run).
 * Calibrate the app's expected `structure.*`/`user.*` fields against captured
   real traffic, using the Python NoLongerEvil server as a differential oracle.
 * Optional: shrink the firmware build by using a user-mode-only qemu instead of

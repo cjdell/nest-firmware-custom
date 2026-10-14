@@ -6,6 +6,7 @@ mod nest;
 mod server;
 mod state;
 mod subs;
+mod ui;
 mod util;
 
 use std::collections::{HashMap, HashSet};

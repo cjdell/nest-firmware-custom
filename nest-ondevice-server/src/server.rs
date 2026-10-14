@@ -125,6 +125,11 @@ fn route(app: &App, req: &crate::http::Request) -> http::Response {
     if let Some(resp) = control::route(app, req) {
         return resp;
     }
+    // Last: the embedded SPA, which only ever answers what the protocol and the
+    // control API left unmatched.
+    if let Some(resp) = crate::ui::route(req) {
+        return resp;
+    }
     http::Response::json_status(404, "{\"error\":\"not found\"}".to_string())
 }
 

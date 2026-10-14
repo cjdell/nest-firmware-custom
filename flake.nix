@@ -80,12 +80,18 @@
           # CARGO_BUILD_TARGET set to the device triple.
           # Only build inputs are hashed, so editing the README/tests does not
           # invalidate the server (and therefore the kernel/firmware) build.
+          # build.rs + ui/dist are in here because the schedule SPA is embedded
+          # into the binary at compile time: changing the bundle changes the
+          # binary, and a rebuild of the image must see it (there is no Bun in
+          # this derivation — the bundle is committed, like hubitat/).
           serverSrc = lib.fileset.toSource {
             root = ./nest-ondevice-server;
             fileset = lib.fileset.unions [
               ./nest-ondevice-server/Cargo.toml
               ./nest-ondevice-server/Cargo.lock
+              ./nest-ondevice-server/build.rs
               ./nest-ondevice-server/src
+              ./nest-ondevice-server/ui/dist
             ];
           };
 

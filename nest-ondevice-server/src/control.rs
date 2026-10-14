@@ -44,6 +44,11 @@ const DEVICE_SETTING_WHITELIST: &[&str] = &[
     "country_code",
 ];
 
+/// Schedule setpoint bounds, in Celsius (the wire is always Celsius). Matches
+/// upstream `command.py:256-257` and the Nest app's own 41-90 °F limits.
+const TEMP_MIN_C: f64 = 4.5;
+const TEMP_MAX_C: f64 = 32.0;
+
 pub fn route(app: &App, req: &Request) -> Option<Response> {
     let path = req.path.as_str();
     match (req.method.as_str(), path) {
@@ -788,18 +793,93 @@ fn cmd_set_schedule(value: &Value) -> Result<Value, String> {
     let Some(days) = obj.get("days").and_then(|v| v.as_object()) else {
         return Err("Schedule must contain a 'days' object".into());
     };
+
+    let mut checked = Map::new();
     for (day_key, day) in days {
         if !matches!(day_key.as_str(), "0" | "1" | "2" | "3" | "4" | "5" | "6") {
-            return Err(format!("Invalid day key '{day_key}'"));
+            return Err(format!(
+                "Invalid day key '{day_key}' (must be '0'-'6', Monday-Sunday)"
+            ));
         }
-        let _ = day;
+        // The device writes each day as a dict keyed by position; the SPA and
+        // upstream's dashboard use arrays. Accept both, validate every entry.
+        let entries: Vec<&Value> = match day {
+            Value::Array(items) => items.iter().collect(),
+            Value::Object(by_index) => {
+                let mut ordered: Vec<(&String, &Value)> = by_index.iter().collect();
+                ordered.sort_by_key(|(k, _)| k.parse::<usize>().unwrap_or(usize::MAX));
+                ordered.into_iter().map(|(_, v)| v).collect()
+            }
+            _ => return Err(format!("Day '{day_key}' must be a list or dict of setpoints")),
+        };
+        for (i, entry) in entries.iter().enumerate() {
+            validate_setpoint(day_key, i, entry)?;
+        }
+        checked.insert(day_key.clone(), day.clone());
     }
-    Ok(json!({
-        "ver": 2,
-        "name": obj.get("name").cloned().unwrap_or(json!("")),
-        "schedule_mode": mode,
-        "days": days,
-    }))
+
+    // Anything else the bucket carried is passed straight through. Upstream's
+    // `validate_schedule` rebuilds the top level from scratch and so silently
+    // drops `schedule_algorithm`, `preconditioning`, `created_at`, …; we keep
+    // them because nlclient is the consumer of this bucket and may key off
+    // fields we have never seen (see the schedule notes in README.md).
+    let mut out = obj.clone();
+    out.insert("ver".into(), json!(2));
+    out.insert(
+        "name".into(),
+        obj.get("name").cloned().unwrap_or_else(|| json!("")),
+    );
+    out.insert("schedule_mode".into(), json!(mode));
+    out.insert("days".into(), Value::Object(checked));
+    Ok(Value::Object(out))
+}
+
+/// Mirror of upstream's per-entry checks (`command.py:295-323`), plus the
+/// device's `entry_type: "continuation"` marker, which carries no temperature.
+fn validate_setpoint(day_key: &str, index: usize, entry: &Value) -> Result<(), String> {
+    let where_ = format!("Day '{day_key}' entry {index}");
+    let obj = entry
+        .as_object()
+        .ok_or_else(|| format!("{where_}: must be an object"))?;
+
+    let time = obj
+        .get("time")
+        .and_then(get_number)
+        .ok_or_else(|| format!("{where_}: missing 'time'"))?;
+    if !(0.0..86400.0).contains(&time) {
+        return Err(format!("{where_}: time must be 0-86399"));
+    }
+    if obj.get("entry_type").and_then(|v| v.as_str()) == Some("continuation") {
+        return Ok(());
+    }
+    let ty = obj
+        .get("type")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_uppercase())
+        .ok_or_else(|| format!("{where_}: missing 'type'"))?;
+    if !matches!(ty.as_str(), "HEAT" | "COOL" | "RANGE") {
+        return Err(format!("{where_}: invalid type '{ty}'"));
+    }
+    if ty == "RANGE" {
+        for key in ["temp-min", "temp-max"] {
+            let temp = obj
+                .get(key)
+                .and_then(get_number)
+                .ok_or_else(|| format!("{where_}: RANGE requires '{key}'"))?;
+            if !(TEMP_MIN_C..=TEMP_MAX_C).contains(&temp) {
+                return Err(format!(
+                    "{where_}: {key}={temp} outside {TEMP_MIN_C}-{TEMP_MAX_C}C"
+                ));
+            }
+        }
+    } else if let Some(temp) = obj.get("temp").and_then(get_number) {
+        if !(TEMP_MIN_C..=TEMP_MAX_C).contains(&temp) {
+            return Err(format!(
+                "{where_}: temp={temp} outside {TEMP_MIN_C}-{TEMP_MAX_C}C"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn cmd_set_schedule_mode(value: &Value) -> Result<Value, String> {

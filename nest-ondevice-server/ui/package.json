@@ -1,0 +1,24 @@
+{
+  "name": "nest-schedule-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Minimal Solid.js SPA for editing the Nest weekly schedule; embedded into the nest-ondevice binary",
+  "scripts": {
+    "build": "bun run build.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "solid-js": "^1.9.17"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.29.7",
+    "@babel/preset-typescript": "^7.29.7",
+    "@happy-dom/global-registrator": "^21.0.1",
+    "@types/bun": "^1.4.3",
+    "babel-preset-solid": "^1.9.16",
+    "bun": "^1.4.3",
+    "bun-plugin-solid": "^1.0.0",
+    "typescript": "^7.0.2"
+  }
+}

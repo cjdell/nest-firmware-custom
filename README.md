@@ -7,6 +7,7 @@ Three pieces:
 | Path | What it is |
 |---|---|
 | [`nest-ondevice-server/`](nest-ondevice-server/) | A compact **Rust** port of the NoLongerEvil Nest-protocol server, sized to run on the thermostat itself, with a read-only `/debug/*` observability API for agent/remote debugging. |
+| [`nest-ondevice-server/ui/`](nest-ondevice-server/ui/) | A **schedule editor**: a Solid.js + TypeScript SPA (Bun bundle) embedded in the server binary, served from the control port, for writing the weekly program. |
 | [`firmware/`](firmware/) | A **firmware image** (the GTVHacker `uImage`) that bundles that server into the initramfs. |
 | [`hubitat/`](hubitat/) | The **Hubitat app + driver** we run (vendored from upstream, patched), plus `push.sh` and the reverse-engineered hub REST procedures. |
 
@@ -28,6 +29,7 @@ git submodule update --init NestDFUAttack   # fresh clone only
 ./build all          # all three
 ./build qemu         # boot the image under qemu-system-arm, assert HTTP works
 ./build test         # the on-device half of the image, against fixtures
+./build ui           # rebuild the schedule SPA bundle (Bun) + its render test
 ./build repro        # prove the image is host-independent (see below)
 ./build status       # dist/ listing + checksums
 ./build shell        # nix develop (cargo + python for the server)
