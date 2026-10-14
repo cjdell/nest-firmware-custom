@@ -53,31 +53,38 @@ then `docs/nest-ondevice-protocol-research.md` for the protocol rationale.
 
 ## Build & verify
 
+One entry point, both hosts: `./build` runs nix directly on Linux and drives the
+Apple-container NixOS VM on macOS. Both call the same `bin/nix-build.sh`, and
+the image is **bit-reproducible**, so the two hosts must print the same sha256.
+
 ```sh
-# Server only (any system; rust-lld, no ARM linker needed)
-nix build .#nest-ondevice
-
-# Firmware image (Linux; --impure is required because default.nix reads
-# NEST_ATTACK_DIR via builtins.getEnv and flakes default to pure eval)
 git submodule update --init NestDFUAttack   # fresh clone only
+
+./build firmware     # -> dist/uImage (+ .sha256, .manifest)
+./build server       # -> dist/nest-ondevice (static armv7 musl binary)
+./build initramfs    # -> dist/initramfs.cpio
+./build all          # all three
+./build qemu         # boot under qemu-system-arm (RealView PB-A8), assert HTTP
+./build repro        # rebuild under every host-dependent difference; compare bytes
+./build status       # dist/ listing + checksums
+./build shell        # nix develop (cargo + python)
+```
+
+Lower level, when you need it:
+
+```sh
+# --impure is required because firmware/default.nix reads NEST_ATTACK_DIR with
+# builtins.getEnv and flakes default to pure evaluation.
 export NEST_ATTACK_DIR=$PWD/NestDFUAttack
-nix build --impure .#firmware            # -> uImage
+nix build --impure .#firmware            # -> uImage in the store
 nix build --impure .#initramfs           # -> initramfs.cpio
+nix build .#nest-ondevice                # server only, any system
+NEST_SRC=$PWD NEST_OUT=$PWD/dist NEST_ATTACK=$attack sh bin/nix-build.sh firmware
 
-# QEMU smoke test of the firmware (same kernel tree + injected rootfs on an
-# emulated ARM RealView PB-A8; no thermostat needed) — see firmware/README.md
-nix build --impure .#nestQemuKernel
-bash firmware/qemu-smoke.sh
-
-# On a Mac: Apple-container NixOS VM drives the Linux build
-bash bin/macos/build.sh start firmware
-bash bin/macos/build.sh wait  firmware   # rc 0 done, 1 failed, 2 still running
-bash bin/macos/build.sh log   firmware
-bash bin/macos/build.sh status           # artifacts + sha256
-bash bin/macos/build.sh vm               # shell inside the build VM
-
-# Native Linux host (no VM)
-NEST_ATTACK_DIR=$PWD/NestDFUAttack ./bin/macos/vm-build.sh firmware
+# On a Mac: the container VM, driven by hand
+bash bin/container.sh run firmware       # stage + build + wait (what ./build does)
+bash bin/container.sh start firmware     # detached; then wait|log|status|vm|stop
+bash bin/container.sh exec sh -c 'nix --version'   # one command in the VM
 
 # Server smoke test (host build)
 cargo build --release --manifest-path nest-ondevice-server/Cargo.toml
@@ -86,12 +93,18 @@ SERVER_PORT=18000 CONTROL_PORT=18082 API_ORIGIN=http://127.0.0.1:18000 \
 python3 nest-ondevice-server/test_smoke.py
 ```
 
-**Verified build (2026-10-12).** Native x86_64-linux (`zen3-nixos`), `nix
-build --impure .#firmware` →
-`/nix/store/jsl835n1jp4kzl96bklr8hqlkb5m0919-nest-firmware-1.0.0`,
-`uImage` sha256 `a9d81aec22a56848e5ef43e93d32be589cae9e14699e1a595e713fe78f0ef2c1`,
-7,269,188 bytes, ~**37 s** with the native i686 toolchain (was ~3m00s under
-qemu-i386). Re-running is cached (same store path, no rebuild).
+**Verified reproducible build (2026-10-14).** Native x86_64-linux
+(`zen3-nixos`), `./build repro`: `uImage` sha256
+`c6cd02cac3fa8817a9896b5f2f57685bbc2e8d239c9a5509592671f912fa4ded`, 7,293,500
+bytes, ~**30 s** per build with the native
+i686 toolchain (~4 min under `qemu-i386`, which produces the same bytes).
+Before the determinism work two builds of the *same* tree on this machine
+differed in 381,517 bytes and in length (the build clock reaches vmlinux via
+`UTS_VERSION` and via the gzip'd `.config` that `CONFIG_IKCONFIG` embeds) — see
+trap 20 and `firmware/README.md` § "Reproducible images".
+
+The banner in a reproducible image is
+`Linux version 2.6.37 (nest@ondevice) (gcc version 4.3.2 (Sourcery G++ Lite 2008q3-72) ) #1  PREEMPT 1970-01-01 00:00:00 UTC`.
 
 Decompress-and-grep check that the server is *inside* the image:
 
@@ -175,10 +188,10 @@ in **`hubitat/README.md`**.
    case (`net/netfilter/xt_HL.c` ↔ `xt_hl.c`, `xt_MARK.h` ↔ `xt_mark.h`, …) with
    **different contents**; a macOS checkout keeps one and `make` fails with
    `No rule to make target 'net/netfilter/xt_HL.o'`. **Fix:**
-   `bin/macos/build.sh` archives `Dev/linux` on the *host* with
+   `bin/container.sh` archives `Dev/linux` on the *host* with
    `git -C $attack archive HEAD Dev/linux` (case-exact: git reads the object
    DB, not the collapsed checkout), writes `$out/.attack-linux.tar`, and
-   `vm-build.sh` extracts it to `/tmp/nest-linux-fixed`, exporting
+   `bin/nix-build.sh` extracts it to `/tmp/nest-linux-fixed`, exporting
    `NEST_LINUX_DIR`. (A native Linux host falls back to `git archive | tar -x`
    in the VM.) Do **not** "fix" this by renaming files — they are distinct
    modules.
@@ -337,6 +350,36 @@ in **`hubitat/README.md`**.
     moved: the hub finds our server by probing `GET /api/config`, and the server
     runs on the thermostat.
 
+20. **The kernel bakes its build identity into the image, and on 2.6.37 two
+    knobs are not enough.** Before 2026-10-14 two builds of the *same* tree on
+    the same machine differed in 381,517 bytes and in total length, because the
+    clock reaches vmlinux by three routes: `UTS_VERSION` (`date` in
+    `scripts/mkcompile_h`), the generated `.config` (`ctime()` in its header —
+    `CONFIG_IKCONFIG=y` embeds it, gzip'd, which is why the *length* moved), and
+    the uImage header `time` field (`mkimage`). Pinning
+    `KBUILD_BUILD_TIMESTAMP` alone does not fix it: **2.6.37's `mkcompile_h` has
+    no `KBUILD_BUILD_USER`/`_HOST`** (2.6.39 added them) so it shells out to
+    `whoami`/`hostname`, and the `.config` stamp has no knob at all. So
+    `firmware/mkcompile_h` *replaces* the kernel's generator (adds those knobs,
+    defaults every one to a fixed value) and `firmware/default.nix` exports
+    `KCONFIG_NOTIMESTAMP=1`, `SOURCE_DATE_EPOCH=0` (`mkimage` honours it — its
+    `-t` is FIT-only), `KBUILD_BUILD_VERSION=1`, `TZ=UTC LC_ALL=C LANG=C`.
+    `./build repro` then proves the bytes are also invariant across the axes the
+    two hosts differ on: the container's `qemu-i386` toolchain path, `-j1`, the
+    `git archive`d kernel, a forced rebuild. Keep `diffutils` in the firmware
+    `nativeBuildInputs` (the replacement `mkcompile_h` uses `cmp`), and re-run
+    the repro check after any nixpkgs bump — `xz`/`ubootTools`/`rust-bin`
+    changes legitimately change the image.
+
+21. **A stale host-side server makes the QEMU smoke test pass vacuously.**
+    `firmware/qemu-smoke.sh` asserts over `127.0.0.1:18000`/`18082`, which qemu
+    forwards *from the host* — so a leftover `SERVER_PORT=18000 … nest-ondevice`
+    (the manual recipe in this file) answers every check while qemu sits there
+    having printed `Could not set up host forwarding rule` and never bound a
+    port. A whole run passed like that. The script now refuses to start if
+    either port already answers; if you ever see five PASS lines with no guest
+    dmesg in the log tail, that is what happened.
+
 ## Layout
 
 ```
@@ -344,12 +387,10 @@ flake.nix                     deps + packages (nest-ondevice, firmware, initramf
 .gitmodules                   pins NestDFUAttack/ to upstream exploiteers/NestDFUAttack
 firmware/
   default.nix                 qemu-i386 toolchain wrappers + kernel make + mkimage
+  mkcompile_h                 deterministic replacement for the kernel's build-identity generator
   inject_initramfs.py         archive-level injection + rootme patch (order-sensitive)
   nest-ondevice.init          on-device /etc/init.d script, installed to /usr/bin
   README.md                   constraints/traps/verify (the long form of this file)
-bin/macos/
-  build.sh                    Mac driver: stage -> Apple-container VM, verbs start|wait|log|status|stage|vm|stop
-  vm-build.sh                 the real build; case-fix, nix build, collect artifacts+manifests
 nest-ondevice-server/         Rust server (src/, Cargo.*, test_smoke.py, deploy/)
 hubitat/
   apps/, drivers/             Hubitat Groovy we run (vendored from upstream + patched)
@@ -357,6 +398,12 @@ hubitat/
   LICENSE.nolongerevil        MIT, upstream copyright (we vendor + modify)
   README.md                   hub deployment facts + reverse-engineered hub REST API
 docs/nest-ondevice-protocol-research.md
+build                         THE build command (dispatches native vs container)
+bin/
+  nix-build.sh                the real build: nix + artifacts + manifest (both hosts)
+  container.sh                Apple-container NixOS VM lifecycle (macOS builder)
+  flake-src.sh                filtered flake source (464 KB, not the 1.3 GB tree)
+  repro-check.sh              rebuild under each host difference, compare sha256
 ```
 
 ## Conventions

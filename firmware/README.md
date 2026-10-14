@@ -18,9 +18,11 @@ uImage.sha256               # checksum to verify before flashing
 `nix` on macOS is `*-darwin`: it can *evaluate* foreign derivations and
 *substitute* cached ones, but it can never **run** an `aarch64-linux` builder.
 The firmware build needs a Linux machine — `make`, `perl`, `bc`, `mkimage`, plus
-the 2008 ARM cross toolchain — so `bin/macos/build.sh` runs the build in an
-[Apple-container](https://github.com/apple/container) NixOS VM. Its `/nix`
-persists between runs, so only changed derivations rebuild.
+the 2008 ARM cross toolchain — so on a Mac `bin/container.sh` runs the build in
+an [Apple-container](https://github.com/apple/container) NixOS VM. Its `/nix`
+persists between runs, so only changed derivations rebuild. The build itself is
+`bin/nix-build.sh` on both hosts, which is why the images match; `./build` picks
+the right one for the machine it is on.
 
 ## The 2008 toolchain: native on x86_64, qemu-i386 elsewhere
 
@@ -60,12 +62,15 @@ only one of each pair and `make` fails with `No rule to make target
 'net/netfilter/xt_HL.o'`. The virtiofs mount of that checkout carries the same
 damage into the VM.
 
-`bin/macos/build.sh` therefore archives `Dev/linux` **on the host** with
+`bin/container.sh` therefore archives `Dev/linux` **on the host** with
 `git archive HEAD Dev/linux` — git reads the object database and is case-exact
-— and hands the tarball to the VM. `bin/macos/vm-build.sh` extracts it onto the
+— and hands the tarball to the VM. `bin/nix-build.sh` extracts it onto the
 case-sensitive `/tmp` and points the build at it via `NEST_LINUX_DIR`. On a
-native case-sensitive host `vm-build.sh` falls back to `git archive` directly;
-either way the build sees the same content.
+native case-sensitive host `nix-build.sh` runs the same `git archive` itself;
+either way the build sees the same content. Archiving from git is also a
+reproducibility measure, not only a case fix: the build then sees exactly the
+tracked tree, so an untracked or locally edited file in one checkout cannot make
+that host's image differ.
 
 ## How the server gets in
 
@@ -151,40 +156,92 @@ in-guest self-test speaks HTTP/1.0 over busybox `nc`. Interfaces come up with
 
 ## Building
 
-On a Mac (Apple container is started automatically):
+One entry point, both hosts:
 
 ```sh
-bash bin/macos/build.sh start firmware
-bash bin/macos/build.sh wait  firmware    # 0 done, 1 failed, 2 still running
-bash bin/macos/build.sh log   firmware
-bash bin/macos/build.sh status
+./build firmware      # -> dist/uImage (+ uImage.sha256, firmware.manifest)
+./build server        # -> dist/nest-ondevice (static ARM musl binary)
+./build initramfs     # -> dist/initramfs.cpio (the intermediate cpio)
+./build all           # firmware + server + initramfs
+./build qemu          # boot the image under qemu-system-arm and assert HTTP works
+./build repro         # prove the image is host-independent (see next section)
+./build status        # what is in dist/, with checksums
+./build clean         # remove dist/
 ```
 
-Artifacts land in `~/.cache/nest-macos/out/` together with a `.manifest`
-(source revision, nix/VM versions, store paths) and `.sha256`.
+On Linux (`x86_64` NixOS or any Linux with nix) that runs `bin/nix-build.sh`
+directly — no VM, no case workaround. On macOS `./build` stages the repo into
+the Apple-container VM, blocks while it builds (streaming the log), and copies
+the artifacts back into `dist/`, so the two hosts look identical from here. Use
+`NEST_DETACH=1 ./build firmware` to fire and forget, then `./build status` (or
+`./build wait`) to collect; `bash bin/container.sh` exposes the lower-level
+verbs (`run|start|wait|log|exec|status|path|stage|vm|stop`).
 
-On any Linux host with Nix (the clean path — no VM and no case workaround):
+`NEST_ATTACK_DIR` must point at the vendored GTVHacker checkout (the
+`NestDFUAttack` submodule; run `git submodule update --init` after cloning).
+With it unset the flake still evaluates and `nix build .#nest-ondevice` works
+anywhere. The raw nix commands still work too:
 
 ```sh
 NEST_ATTACK_DIR=$PWD/NestDFUAttack nix build --impure .#firmware
-# or the artifact + manifest wrapper:
-NEST_ATTACK_DIR=$PWD/NestDFUAttack ./bin/macos/vm-build.sh firmware
+NEST_SRC=$PWD NEST_OUT=$PWD/dist NEST_ATTACK=$PWD/NestDFUAttack sh bin/nix-build.sh firmware
 ```
 
-`NEST_ATTACK_DIR` must point at the vendored GTVHacker checkout (the `NestDFUAttack`
-submodule; run `git submodule update --init` after cloning). With it unset the
-flake still evaluates and `nix build .#nest-ondevice` works anywhere.
+Both hosts evaluate `bin/flake-src.sh`: a *filtered* copy of the tree (464 KB).
+`builtins.getFlake` on the checkout itself copies 1.3 GB into the store on every
+invocation — the `NestDFUAttack` submodule alone is 884 MB — and re-copies each
+time an artifact lands in `dist/`. Nothing is lost: the kernel, initramfs and
+toolchain the build reads arrive through `NEST_ATTACK_DIR`, an absolute path
+outside the flake source.
 
-## Flashing (untested on hardware)
+## Reproducible images
+
+The `uImage` is bit-reproducible: the same source builds to the same bytes on
+either host, so "flash this image" is a checksum, not folklore. Everything that
+could differ between machines is pinned in `firmware/default.nix`:
+
+| Leak | Where it lands | Fix |
+|---|---|---|
+| `date` in `UTS_VERSION` | `linux_banner`, `/proc/version`, `uname -r` output | `KBUILD_BUILD_TIMESTAMP` (default `1970-01-01 00:00:00 UTC`) |
+| `whoami` / `hostname` | same banner — 2.6.37 has **no** `KBUILD_BUILD_USER/HOST` | `firmware/mkcompile_h` replaces the kernel's generator and adds those knobs |
+| `ctime()` in the generated `.config` | embedded by `CONFIG_IKCONFIG=y`, gzip'd into vmlinux | `KCONFIG_NOTIMESTAMP=1` |
+| `time()` in the uImage header | bytes 8-11 of the 64-byte header (+ the header CRC) | `SOURCE_DATE_EPOCH=0`, which `mkimage` honours |
+| build path / locale | any tool that echoes its argv | nix sandbox (`/build`), `TZ=UTC LC_ALL=C LANG=C` |
+| `make -j<N>` width | link/compress order | unchanged (verified identical at `-j1` and `-j32`) |
+| i686 toolchain run natively vs under `qemu-i386` | the compiler *invocation* only | verified identical (`NEST_TOOLCHAIN=native\|qemu`) |
+
+The banner in a reproducible image reads
+`Linux version 2.6.37 (nest@ondevice) (gcc version 4.3.2 (Sourcery G++ Lite 2008q3-72) ) #1  PREEMPT 1970-01-01 00:00:00 UTC`.
+Override `NEST_BUILD_TIMESTAMP` / `NEST_BUILD_USER` / `NEST_BUILD_HOST` only to
+reproduce an older image byte for byte.
+
+Prove it on one machine with `./build repro` (`bin/repro-check.sh`): it rebuilds
+the image under each difference the two hosts have — a forced rebuild in a fresh
+`TMPDIR`, the container's `qemu-i386` toolchain path, `make -j1`, the
+`git archive`d kernel — and builds the ARM server twice, comparing the two
+binaries with each other. It prints one reference sha256 per artifact; the other
+host must print the same numbers. Nix caches each variant, so a second run is
+nearly free; `REPRO_FRESH=1 ./build repro` adds `--rebuild` and does the work
+again. On aarch64 the native i686 toolchain cannot execute and `default.nix`
+chooses qemu by itself, so the `qemu-toolchain` variant is a no-op there.
+
+What the check does *not* cover is the last mile: the two hosts run different
+`gcc` builds for the **host** tools (x86_64 vs aarch64) and different `xz`/`nix`
+revisions if `flake.lock` is not honoured. Keep `flake.lock` committed and
+untouched when comparing images, and compare `dist/uImage.sha256` after any
+nixpkgs bump.
+
+## Flashing
 
 Use the existing `NestDFUAttack` flow (`Dev/build.sh`, `omap3_usbload`, the
 `Release/Nest` scripts) and substitute the freshly built `uImage`. This repo
-does not flash anything.
+does not flash anything; `AGENTS.md` records the procedure used on the unit at
+`192.168.1.2`.
 
 ## Verify before flashing
 
 ```sh
-sha256sum -c uImage.sha256
+sha256sum -c uImage.sha256      # and compare the sha256 with the other build host
 ```
 
 The initramfs inside the image should contain the server:
@@ -202,13 +259,11 @@ or build `.#initramfs` and inspect the cpio with `cpio -it`.
 
 ## Caveats
 
-* **Not yet run on a real thermostat.** The image builds, embeds the server and
-  the on-flash install step is written to run before the unmount, but the
-  end-to-end first boot and the app↔localhost protocol have not been validated
-  on hardware.
-* The kernel is unchanged from GTVHacker except for the embedded initramfs, so
-  existing DFU/root assumptions still apply.
-* `hostname: command not found` during the kernel build only affects the
-  `#define` in `compile.h`; it is harmless.
-* The build expects the case-damaged checkout; the case-fix restores the 13
-  collided sources but does not otherwise validate the vendored tree.
+* The kernel is unchanged from GTVHacker except for the embedded initramfs and
+  the deterministic `scripts/mkcompile_h`, so existing DFU/root assumptions
+  still apply.
+* `mkcompile_h` used to print `hostname: command not found` inside the nix
+  sandbox; the replacement never shells out for identity, so that noise is gone.
+* The build expects the case-damaged checkout to be fixed first (`nix-build.sh`
+  does it); the fix restores the 13 collided sources but does not otherwise
+  validate the vendored tree.

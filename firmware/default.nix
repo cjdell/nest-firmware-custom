@@ -11,10 +11,38 @@
 # under qemu-i386; the i386 glibc it links against comes from pkgsCross.gnu32.
 # gcc's own subprocesses (cc1/as/ld/collect2) are reached through native
 # wrapper scripts via COMPILER_PATH, so no binfmt_misc is needed.
+#
+# The image is *reproducible*: the same source builds to the same uImage bytes
+# on any host. See firmware/README.md ("Reproducible images") and the knobs
+# below, all read impurely like NEST_ATTACK_DIR.
 { pkgs, lib, nest-ondevice }:
 let
   dir = builtins.getEnv "NEST_ATTACK_DIR";
   linuxEnv = builtins.getEnv "NEST_LINUX_DIR";
+
+  envOr = name: def: let v = builtins.getEnv name; in if v == "" then def else v;
+
+  # Build identity baked into vmlinux. Fixed so the clock and the machine never
+  # reach the image; override only to reproduce an older image byte for byte.
+  buildStamp = envOr "NEST_BUILD_TIMESTAMP" "1970-01-01 00:00:00 UTC";
+  buildUser = envOr "NEST_BUILD_USER" "nest";
+  buildHost = envOr "NEST_BUILD_HOST" "ondevice";
+
+  # `make -j` width. Empty = whatever nix allocated. bin/repro-check.sh varies
+  # it to prove parallelism does not change the output.
+  makeJobs = envOr "NEST_MAKE_JOBS" "";
+  jobsFlag =
+    if makeJobs == "" then
+      "$NIX_BUILD_CORES"
+    else if builtins.match "[0-9]+" makeJobs == null then
+      throw "NEST_MAKE_JOBS must be a positive integer, got '${makeJobs}'"
+    else
+      makeJobs;
+
+  # Which way to run the i686 2008 toolchain. `auto` = native on x86_64 Linux,
+  # qemu-i386 elsewhere (aarch64-linux = the macOS container). Forcing one is
+  # how the repro check proves both paths yield identical bytes.
+  toolchainFlavour = envOr "NEST_TOOLCHAIN" "auto";
 in
 if dir == "" then
   { }
@@ -22,7 +50,7 @@ else
   let
     # A git checkout of the kernel on a case-insensitive filesystem collapses
     # the 13 case-distinct netfilter sources (xt_HL.c/xt_hl.c, ...) onto one
-    # on-disk name, so make cannot find them. vm-build.sh re-materialises
+    # on-disk name, so make cannot find them. bin/nix-build.sh re-materialises
     # Dev/linux from git and points NEST_LINUX_DIR at it.
     linuxPath = if linuxEnv == "" then dir + "/Dev/linux" else linuxEnv;
     attack = {
@@ -117,10 +145,17 @@ EOF
     '';
 
     crossToolchain =
-      if pkgs.stdenv.hostPlatform.isLinux && pkgs.stdenv.hostPlatform.isx86_64 then
+      if toolchainFlavour == "native" then
         nativeToolchain
+      else if toolchainFlavour == "qemu" then
+        qemuToolchain
+      else if toolchainFlavour == "auto" then
+        if pkgs.stdenv.hostPlatform.isLinux && pkgs.stdenv.hostPlatform.isx86_64 then
+          nativeToolchain
+        else
+          qemuToolchain
       else
-        qemuToolchain;
+        throw "NEST_TOOLCHAIN must be auto|native|qemu, got '${toolchainFlavour}'";
 
     # Base initramfs + the server binary + its init script.
     initramfs = pkgs.runCommand "nest-initramfs" {
@@ -150,6 +185,7 @@ EOF
         xz
         ubootTools
         file
+        diffutils   # ./mkcompile_h compares with `cmp -s` before replacing
       ];
 
       buildPhase = ''
@@ -159,12 +195,32 @@ EOF
         export CROSS_COMPILE=${crossToolchain}/bin/arm-none-linux-gnueabi-
         export HOSTCC=${pkgs.stdenv.cc}/bin/cc HOSTCXX=${pkgs.stdenv.cc}/bin/cxx
 
+        # --- reproducible build identity --------------------------------------
+        # The kernel links its build identity into vmlinux (the "Linux version"
+        # banner, UTS_VERSION, /proc/version) and, because CONFIG_IKCONFIG=y,
+        # the .config text as well. Pin every clock/identity input so the image
+        # depends only on the source:
+        #   KBUILD_BUILD_*     -> scripts/mkcompile_h (replaced; 2.6.37 has no
+        #                         KBUILD_BUILD_USER/HOST, ours does)
+        #   KCONFIG_NOTIMESTAMP-> the "# <date>" line inside the embedded .config
+        #   SOURCE_DATE_EPOCH  -> the uImage header time field (mkimage honours it)
+        export KBUILD_BUILD_TIMESTAMP=${lib.escapeShellArg buildStamp}
+        export KBUILD_BUILD_USER=${lib.escapeShellArg buildUser}
+        export KBUILD_BUILD_HOST=${lib.escapeShellArg buildHost}
+        export KBUILD_BUILD_VERSION=1
+        export KCONFIG_NOTIMESTAMP=1
+        export SOURCE_DATE_EPOCH=0
+        export TZ=UTC LC_ALL=C LANG=C
+
         mkdir -p build
         cp -r ${attack.linux} build/linux
         chmod -R u+w build/linux
         # CONFIG_INITRAMFS_SOURCE="../initramfs_data.cpio" is relative to the
         # kernel dir, so the cpio lives one level up.
         cp ${initramfs}/initramfs.cpio build/initramfs_data.cpio
+        # Deterministic stand-in for the kernel's build-identity generator.
+        cp ${./mkcompile_h} build/linux/scripts/mkcompile_h
+        chmod 755 build/linux/scripts/mkcompile_h
 
         cd build/linux
         make ARCH=arm distclean
@@ -176,7 +232,7 @@ EOF
         make ARCH=arm \
           CROSS_COMPILE="$CROSS_COMPILE" \
           HOSTCC="$HOSTCC" HOSTCXX="$HOSTCXX" \
-          uImage -j"$NIX_BUILD_CORES"
+          uImage -j"${jobsFlag}"
 
         runHook postBuild
       '';

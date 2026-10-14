@@ -1,0 +1,84 @@
+#!/bin/sh
+# Deterministic stand-in for the GTVHacker kernel's scripts/mkcompile_h.
+# firmware/default.nix copies this over the kernel's copy before building.
+#
+# WHY. Upstream 2.6.37 bakes the build clock, `whoami` and `hostname` into
+# include/generated/compile.h, and those strings are linked into vmlinux (the
+# "Linux version ..." banner, /proc/version, UTS_VERSION). Two builds of the
+# same source on two machines therefore produced different uImages:
+#
+#   Linux version 2.6.37 (nixbld@) (gcc version 4.3.2 ...) #1 PREEMPT Mon Oct 12 15:25:31 UTC 2026
+#
+# Upstream honours only KBUILD_BUILD_TIMESTAMP and KBUILD_BUILD_VERSION here;
+# KBUILD_BUILD_USER/HOST landed in 2.6.39, so this file brings them to 2.6.37
+# and defaults every one of them to a fixed value. Result: the image depends on
+# the source, not on the machine or the clock.
+#
+# Call signature is unchanged — init/Makefile invokes:
+#   mkcompile_h <target> <UTS_MACHINE> <SMP> <PREEMPT> "<CC> <cflags>"
+#
+# Only UTS_MACHINE, UTS_VERSION, LINUX_COMPILE_BY/HOST/COMPILER are read by this
+# tree (init/version.c); LINUX_COMPILE_TIME/DOMAIN are kept for completeness.
+#
+# Override the defaults to reproduce an older image byte for byte.
+
+TARGET=$1
+ARCH=$2
+SMP=$3
+PREEMPT=$4
+CC=$5
+
+# Do not expand names (upstream did this too).
+set -f
+# Fix the language for consistent tool output.
+LC_ALL=C
+export LC_ALL
+
+: "${KBUILD_BUILD_VERSION:=1}"
+: "${KBUILD_BUILD_TIMESTAMP:=1970-01-01 00:00:00 UTC}"
+: "${KBUILD_BUILD_USER:=nest}"
+: "${KBUILD_BUILD_HOST:=ondevice}"
+: "${KBUILD_BUILD_DOMAIN:=}"
+
+VERSION=$KBUILD_BUILD_VERSION
+TIMESTAMP=$KBUILD_BUILD_TIMESTAMP
+
+CONFIG_FLAGS=""
+if [ -n "$SMP" ]; then CONFIG_FLAGS="SMP"; fi
+if [ -n "$PREEMPT" ]; then CONFIG_FLAGS="$CONFIG_FLAGS PREEMPT"; fi
+
+UTS_VERSION="#$VERSION $CONFIG_FLAGS $TIMESTAMP"
+
+# Truncate to the maximum length the kernel stores.
+UTS_LEN=64
+UTS_TRUNCATE="cut -b -$UTS_LEN"
+
+(
+  echo "/* This file is auto generated, version $VERSION */"
+  if [ -n "$CONFIG_FLAGS" ]; then echo "/* $CONFIG_FLAGS */"; fi
+
+  echo "#define UTS_MACHINE \"$ARCH\""
+  echo "#define UTS_VERSION \"`echo "$UTS_VERSION" | $UTS_TRUNCATE`\""
+
+  echo "#define LINUX_COMPILE_TIME \"`echo "$TIMESTAMP" | cut -d' ' -f4`\""
+  echo "#define LINUX_COMPILE_BY \"$KBUILD_BUILD_USER\""
+  echo "#define LINUX_COMPILE_HOST \"$KBUILD_BUILD_HOST\""
+  if [ -n "$KBUILD_BUILD_DOMAIN" ]; then
+    echo "#define LINUX_COMPILE_DOMAIN \"`echo "$KBUILD_BUILD_DOMAIN" | $UTS_TRUNCATE`\""
+  else
+    echo "#define LINUX_COMPILE_DOMAIN"
+  fi
+
+  # The cross compiler's own version line: identical on every host because the
+  # toolchain comes from the pinned vendored tree (the qemu-i386 wrapper does
+  # not change what `gcc -v` prints).
+  echo "#define LINUX_COMPILER \"`$CC -v 2>&1 | tail -n 1`\""
+) > "$TARGET.tmp" || exit 1
+
+# Keep upstream's behaviour of not touching the file when nothing changed, so a
+# regenerated compile.h never forces a rebuild.
+if [ -r "$TARGET" ] && cmp -s "$TARGET.tmp" "$TARGET"; then
+  rm -f "$TARGET.tmp"
+else
+  mv -f "$TARGET.tmp" "$TARGET"
+fi

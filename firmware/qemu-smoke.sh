@@ -16,8 +16,25 @@ cd "$root"
 : "${NEST_ATTACK_DIR:=$root/NestDFUAttack}"
 export NEST_ATTACK_DIR
 
+# Pre-flight: qemu forwards 18000/18082 from the guest to the host, so anything
+# already listening there answers the checks below and the test proves nothing —
+# it happily passes against a stale host-side nest-ondevice while qemu sits there
+# unable to bind. Fail loudly instead. (This bit us: a leftover
+# SERVER_PORT=18000 run made a whole smoke run pass vacuously.)
+for p in 18000 18082; do
+    if curl -s -m 1 -o /dev/null "http://127.0.0.1:$p/"; then
+        echo "qemu-smoke: 127.0.0.1:$p already answers — stop whatever holds it first" >&2
+        echo "  (a stale server would answer these checks; the guest never would)" >&2
+        exit 1
+    fi
+done
+
 echo "==> building .#nestQemuKernel"
-K=$(nix build --impure .#nestQemuKernel --print-out-paths)
+# The filtered flake source, same as ./build (bin/flake-src.sh): the checkout
+# itself is 1.3 GB and getFlake copies all of it.
+flake=$(sh bin/flake-src.sh)
+K=$(nix build --impure --no-link --print-out-paths \
+    --expr "let f = builtins.getFlake \"$flake\"; in f.packages.$(uname -m)-linux.nestQemuKernel")
 echo "    $K"
 
 log=$(mktemp)

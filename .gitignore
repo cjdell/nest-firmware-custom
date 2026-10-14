@@ -8,6 +8,7 @@
 /hubitatcontrol/
 
 # Build outputs
+/dist/
 /result
 /result-*
 /nest-ondevice-server/target/

@@ -1,45 +1,55 @@
 #!/bin/sh
-# build.sh — build this repo's Linux outputs on a Mac, with no Linux machine
-# of your own: Apple's `container` runtime + a NixOS Linux VM is the builder.
+# container.sh — the Linux build host for a Mac: Apple's `container` runtime
+# plus a NixOS Linux VM.
 #
-# nix on macOS is *-darwin: it can evaluate foreign drvs and substitute cached
-# ones, but it can never RUN an aarch64/x86_64-linux builder. The firmware
-# build needs a Linux machine (make/perl + the 2008 i686 ARM toolchain run under
-# qemu-i386), so the container VM supplies exactly that. Its /nix survives
-# between runs, so iteration only rebuilds what changed.
+# You normally do not call this directly. `./build` is the entry point: on Linux
+# it runs bin/nix-build.sh in place, on macOS it dispatches here. Both end up
+# running the *same* build script, which is why the two hosts produce identical
+# images (bin/repro-check.sh proves the parts that differ).
+#
+# Why a VM at all: nix on macOS is *-darwin, so it can evaluate foreign drvs and
+# substitute cached ones but can never RUN a Linux builder, and the firmware
+# build needs Linux userland (make/perl + the 2008 i686 ARM toolchain under
+# qemu-i386). The VM's /nix survives between runs, so iteration only rebuilds
+# what changed.
 #
 # Usage (from the repo root):
-#   bash bin/macos/build.sh start [TARGET]   # stage + detached build
-#   bash bin/macos/build.sh wait  [TARGET]   # rc 0 = done, 1 = failed, 2 = running
-#   bash bin/macos/build.sh log   [TARGET]   # tail -f the build log
-#   bash bin/macos/build.sh status
-#   bash bin/macos/build.sh stage            # only rsync the repo into the VM
-#   bash bin/macos/build.sh vm               # a shell inside the build VM
-#   bash bin/macos/build.sh stop             # stop the VM (its /nix is kept)
+#   bash bin/container.sh run    [TARGET]  # stage + build + wait (what ./build does)
+#   bash bin/container.sh start  [TARGET]  # stage + detached build
+#   bash bin/container.sh wait   [TARGET]  # rc 0 = done, 1 = failed, 2 = running
+#   bash bin/container.sh log    [TARGET]  # tail -f the build log
+#   bash bin/container.sh exec   <cmd..>   # one command inside the VM
+#   bash bin/container.sh status           # VM state + artifacts + checksums
+#   bash bin/container.sh path             # the host artifact directory
+#   bash bin/container.sh stage            # only rsync the repo into the VM
+#   bash bin/container.sh vm               # a shell inside the build VM
+#   bash bin/container.sh stop             # stop the VM (its /nix is kept)
 #
-#   TARGET (default firmware) = packages.<system>.* :
+#   TARGET (default firmware) = a packages.<system>.* attribute:
 #   firmware (the uImage), nest-ondevice (the ARM binary), initramfs.
 #
 # Overrides:
-#   NEST_MACOS_CACHE      (~/.cache/nest-macos)
-#   NEST_MACOS_CONTAINER  (nest-builder)
-#   NEST_MACOS_IMAGE      (docker.io/rzmapp/nixos-vm:26.05)
-#   NEST_MACOS_CPUS       (8)   NEST_MACOS_MEMORY (12g)
-#   NEST_ATTACK_DIR       (host path to the vendored NestDFUAttack tree)
+#   NEST_VM_CACHE      ~/.cache/nest-build   (staged repo, VM logs, artifacts)
+#   NEST_VM_CONTAINER  nest-builder          (container name)
+#   NEST_VM_IMAGE      docker.io/rzmapp/nixos-vm:26.05
+#   NEST_VM_CPUS       8
+#   NEST_VM_MEMORY     12g
+#   NEST_VM_POLL       5    (seconds between ./build progress polls)
+#   NEST_ATTACK_DIR    the vendored NestDFUAttack tree (default ./NestDFUAttack)
 set -eu
 
-repo=$(cd "$(dirname "$0")/../.." && pwd)
-cache=${NEST_MACOS_CACHE:-$HOME/.cache/nest-macos}
+repo=$(cd "$(dirname "$0")/.." && pwd)
+cache=${NEST_VM_CACHE:-$HOME/.cache/nest-build}
 src=$cache/src
 out=$cache/out
 certs=$cache/certs
-cname=${NEST_MACOS_CONTAINER:-nest-builder}
-image=${NEST_MACOS_IMAGE:-docker.io/rzmapp/nixos-vm:26.05}
-cpus=${NEST_MACOS_CPUS:-8}
-memory=${NEST_MACOS_MEMORY:-12g}
+cname=${NEST_VM_CONTAINER:-nest-builder}
+image=${NEST_VM_IMAGE:-docker.io/rzmapp/nixos-vm:26.05}
+cpus=${NEST_VM_CPUS:-8}
+memory=${NEST_VM_MEMORY:-12g}
 attack=${NEST_ATTACK_DIR:-$repo/NestDFUAttack}
 
-die() { echo "macos/build: $*" >&2; exit 1; }
+die() { echo "container: $*" >&2; exit 1; }
 
 need_container() {
     command -v container >/dev/null 2>&1 ||
@@ -61,6 +71,7 @@ stage() {
     # target dir and VCS metadata.
     rsync -a --delete \
         --exclude .git \
+        --exclude dist/ \
         --exclude NestDFUAttack/ \
         --exclude NoLongerEvil-SelfHosted/ \
         --exclude NoLongerEvil-Thermostat/ \
@@ -68,7 +79,7 @@ stage() {
         --exclude nest-ondevice-server/target/ \
         --exclude .DS_Store \
         "$repo/" "$src/"
-    echo "macos/build: staged $repo -> $src" >&2
+    echo "container: staged $repo -> $src" >&2
 }
 
 running() { container list --quiet 2>/dev/null | grep -qx "$cname"; }
@@ -77,10 +88,10 @@ exists()  { container list --all --quiet 2>/dev/null | grep -qx "$cname"; }
 ensure_container() {
     need_container
     if exists; then
-        running || { echo "macos/build: starting $cname" >&2; container start "$cname" >/dev/null; }
+        running || { echo "container: starting $cname" >&2; container start "$cname" >/dev/null; }
         return
     fi
-    echo "macos/build: creating $cname from $image ($cpus cpus, $memory)" >&2
+    echo "container: creating $cname from $image ($cpus cpus, $memory)" >&2
     container create --name "$cname" --cpus "$cpus" --memory "$memory" \
         --mount type=virtiofs,source="$src",target=/src,readonly \
         --mount type=virtiofs,source="$out",target=/out \
@@ -115,35 +126,62 @@ start_build() {
         git -C "$attack" -c safe.directory='*' archive --format=tar HEAD Dev/linux \
             > "$linux_tar.part"
         mv -f "$linux_tar.part" "$linux_tar"
-        echo "macos/build: case-exact Dev/linux archived -> $linux_tar" >&2
+        echo "container: case-exact Dev/linux archived -> $linux_tar" >&2
     fi
 
     container exec -d "$cname" sh -c \
         "NEST_HOST_REV='$rev' NEST_SRC=/src NEST_OUT=/out NEST_ATTACK=/nest/attack \
          NEST_LINUX_TAR='$linux_tar' \
-         sh /src/bin/macos/vm-build.sh $target > /out/$target.log 2>&1; \
+         sh /src/bin/nix-build.sh $target > /out/$target.log 2>&1; \
          echo \$? > /out/$target.rc" \
         >/dev/null
 
-    echo "macos/build: $target building in $cname (rev ${rev:-unknown})" >&2
-    echo "macos/build: poll with  bash bin/macos/build.sh wait $target" >&2
+    echo "container: $target building in $cname (rev ${rev:-unknown})" >&2
+    echo "container: poll with  bash bin/container.sh wait $target" >&2
 }
 
 wait_build() {
     target=${1:-firmware}
     if [ ! -f "$out/$target.rc" ]; then
-        tail -n "${NEST_MACOS_TAIL:-5}" "$out/$target.log" 2>/dev/null || true
-        echo "macos/build: $target STILL RUNNING (rc=2)" >&2
+        tail -n "${NEST_VM_TAIL:-5}" "$out/$target.log" 2>/dev/null || true
+        echo "container: $target STILL RUNNING (rc=2)" >&2
         exit 2
     fi
     rc=$(cat "$out/$target.rc")
-    tail -n "${NEST_MACOS_TAIL:-20}" "$out/$target.log"
+    tail -n "${NEST_VM_TAIL:-20}" "$out/$target.log"
     if [ "$rc" = 0 ]; then
-        echo "macos/build: $target DONE rc=0" >&2
+        echo "container: $target DONE rc=0" >&2
         exit 0
     fi
-    echo "macos/build: $target FAILED rc=$rc — see $out/$target.log" >&2
+    echo "container: $target FAILED rc=$rc — see $out/$target.log" >&2
     exit 1
+}
+
+# Start a build and block until it finishes, streaming new log lines as they
+# appear. This is what makes `./build firmware` a single command on a Mac.
+run_build() {
+    target=${1:-firmware}
+    start_build "$target"
+    seen=0
+    while :; do
+        if [ -f "$out/$target.log" ]; then
+            total=$(wc -l < "$out/$target.log")
+            if [ "$total" -gt "$seen" ]; then
+                sed -n "$((seen + 1)),\$p" "$out/$target.log"
+                seen=$total
+            fi
+        fi
+        if [ -f "$out/$target.rc" ]; then
+            rc=$(cat "$out/$target.rc")
+            if [ "$rc" = 0 ]; then
+                echo "container: $target DONE" >&2
+                return 0
+            fi
+            echo "container: $target FAILED rc=$rc — full log: $out/$target.log" >&2
+            return 1
+        fi
+        sleep "${NEST_VM_POLL:-5}"
+    done
 }
 
 status() {
@@ -169,13 +207,16 @@ status() {
 }
 
 case ${1:-} in
+    run)    shift; run_build "$@" ;;
     start)  shift; start_build "$@" ;;
     wait)   shift; wait_build "$@" ;;
-    log)    shift; tail -n "${NEST_MACOS_TAIL:-40}" -f "$out/${1:-firmware}.log" ;;
+    log)    shift; tail -n "${NEST_VM_TAIL:-40}" -f "$out/${1:-firmware}.log" ;;
     status) status ;;
     stage)  stage ;;
+    path)   echo "$out" ;;
+    exec)   shift; ensure_container; exec container exec "$cname" "$@" ;;
     vm|sh)  ensure_container; exec container exec -it "$cname" sh -l ;;
     stop)   container stop "$cname" 2>/dev/null || true ;;
-    ""|-h|--help|help) sed -n '2,32p' "$0" ;;
-    *)      die "unknown verb '$1' (try: start|wait|log|status|stage|vm|stop)" ;;
+    ""|-h|--help|help) sed -n '2,38p' "$0" ;;
+    *)      die "unknown verb '$1' (try: run|start|wait|log|exec|status|path|stage|vm|stop)" ;;
 esac

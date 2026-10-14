@@ -44,6 +44,7 @@ let
         gzip
         xz
         file
+        diffutils   # ./mkcompile_h compares with `cmp -s` before replacing
       ];
 
       buildPhase = ''
@@ -53,6 +54,14 @@ let
         export CROSS_COMPILE=${crossToolchain}/bin/arm-none-linux-gnueabi-
         export HOSTCC=${pkgs.stdenv.cc}/bin/cc HOSTCXX=${pkgs.stdenv.cc}/bin/cxx
 
+        # Same pinned build identity as the flashable image (see "reproducible
+        # build identity" in firmware/default.nix), so this kernel's banner does
+        # not depend on the clock either. The NEST_BUILD_* knobs are deliberately
+        # not read here: this image is a dev artifact and is never flashed.
+        export KBUILD_BUILD_TIMESTAMP="1970-01-01 00:00:00 UTC"
+        export KBUILD_BUILD_USER=nest KBUILD_BUILD_HOST=qemu KBUILD_BUILD_VERSION=1
+        export KCONFIG_NOTIMESTAMP=1 TZ=UTC LC_ALL=C LANG=C
+
         mkdir -p build
         cp -r ${attack.linux} build/linux
         chmod -R u+w build/linux
@@ -61,6 +70,10 @@ let
         ''}
 
         cd build/linux
+        # Deterministic stand-in for the kernel's build-identity generator
+        # (2.6.37 has no KBUILD_BUILD_USER/HOST); same file the real image uses.
+        cp ${./mkcompile_h} scripts/mkcompile_h
+        chmod 755 scripts/mkcompile_h
         make ARCH=arm distclean
         make ARCH=arm realview_defconfig
 

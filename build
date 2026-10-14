@@ -1,0 +1,177 @@
+#!/bin/sh
+# build — the only build command in this repo.
+#
+#   ./build firmware     # uImage to flash          -> dist/uImage
+#   ./build server       # the ARM server binary    -> dist/nest-ondevice
+#   ./build initramfs    # patched initramfs cpio   -> dist/initramfs.cpio
+#   ./build all          # firmware + server + initramfs
+#   ./build qemu         # boot the image under qemu-system-arm, assert HTTP works
+#   ./build repro        # prove the image is host-independent (see below)
+#   ./build status       # what is in dist/, with checksums
+#   ./build shell        # nix develop (cargo + python for the server)
+#   ./build clean        # remove dist/ (the nix store is left alone)
+#
+# ONE COMMAND, TWO HOSTS. On Linux (NixOS amd64, or any Linux with nix) the
+# build runs here directly. On macOS it runs inside an Apple-container NixOS
+# VM, because nix on macOS is *-darwin and can never run a Linux builder, while
+# the firmware build needs Linux userland plus the 2008 i686 ARM toolchain.
+# Both paths call the same bin/nix-build.sh, so the artifacts are the same
+# bytes: `./build repro` checks the invariants that make that true (forced
+# rebuild, the container's qemu-i386 toolchain path, -j1, the git-archived
+# kernel) and prints the sha256 to compare against the other machine.
+#
+# Environment:
+#   NEST_ATTACK_DIR   vendored GTVHacker tree        (default ./NestDFUAttack)
+#   NEST_DIST         artifact directory             (default ./dist)
+#   NEST_DETACH=1     macOS only: start the build and return; finish with
+#                     ./build status (or ./build wait) to collect artifacts
+#   NEST_TOOLCHAIN    auto|native|qemu               (default auto, see firmware/)
+#   NEST_MAKE_JOBS    make -j for the kernel         (default: nix's core count)
+#   NEST_BUILD_TIMESTAMP / NEST_BUILD_USER / NEST_BUILD_HOST
+#                     the build identity baked into vmlinux (already pinned)
+set -eu
+
+repo=$(cd "$(dirname "$0")" && pwd)
+dist=${NEST_DIST:-$repo/dist}
+attack=${NEST_ATTACK_DIR:-$repo/NestDFUAttack}
+
+# Recorded in every artifact manifest: which source built it, and whether that
+# source was dirty (bin/container.sh does the same for the VM path).
+rev=$(git -C "$repo" rev-parse --short HEAD 2>/dev/null || echo unknown)
+if [ -n "$(git -C "$repo" status --porcelain 2>/dev/null)" ]; then
+    rev="${rev}-dirty"
+fi
+export NEST_HOST_REV=${NEST_HOST_REV:-$rev}
+
+os=$(uname -s)
+case $os in
+    Darwin) via=container ;;
+    *) via=native ;;
+esac
+
+die() { echo "build: $*" >&2; exit 1; }
+
+attr_for() {
+    case $1 in
+        firmware) echo firmware ;;
+        server) echo nest-ondevice ;;
+        initramfs) echo initramfs ;;
+        *) return 1 ;;
+    esac
+}
+
+need_attack() {
+    [ -d "$attack/Dev" ] ||
+        die "no GTVHacker tree at $attack — run 'git submodule update --init NestDFUAttack' or set NEST_ATTACK_DIR"
+}
+
+# The container keeps its own scratch (staged repo, logs, rc files) and exports
+# finished artifacts; copy them into dist/ so both hosts look the same.
+collect_from_vm() {
+    vmout=$(sh "$repo/bin/container.sh" path)
+    [ -d "$vmout" ] || return 0
+    for f in "$vmout"/*; do
+        [ -e "$f" ] || continue
+        case $(basename "$f") in
+            *.log | *.rc | *.paths | .*) continue ;;
+        esac
+        cp -f "$f" "$dist/$(basename "$f")"
+    done
+}
+
+show_dist() {
+    [ -d "$dist" ] || { echo "build: nothing built yet (no $dist)"; return 0; }
+    echo "artifacts in $dist:"
+    found=0
+    for f in "$dist"/*; do
+        [ -e "$f" ] || continue
+        case $f in *.log | *.rc | *.paths) continue ;; esac
+        printf '  %-22s %8s  %s\n' "$(basename "$f")" "$(du -h "$f" | cut -f1)" \
+            "$(sha256sum "$f" 2>/dev/null | cut -c1-16)"
+        found=1
+    done
+    [ "$found" = 1 ] || echo "  (empty)"
+}
+
+case ${1:-help} in
+    firmware | server | initramfs)
+        target=$(attr_for "$1") || die "bad target"
+        mkdir -p "$dist"
+        need_attack
+        if [ "$via" = native ]; then
+            NEST_SRC=$repo NEST_OUT=$dist NEST_ATTACK=$attack \
+                exec sh "$repo/bin/nix-build.sh" "$target"
+        fi
+        if [ "${NEST_DETACH:-}" = 1 ]; then
+            exec sh "$repo/bin/container.sh" start "$target"
+        fi
+        sh "$repo/bin/container.sh" run "$target" || exit 1
+        collect_from_vm
+        show_dist
+        ;;
+
+    all)
+        mkdir -p "$dist"
+        need_attack
+        if [ "$via" = native ]; then
+            NEST_SRC=$repo NEST_OUT=$dist NEST_ATTACK=$attack \
+                exec sh "$repo/bin/nix-build.sh" firmware nest-ondevice initramfs
+        fi
+        if [ "${NEST_DETACH:-}" = 1 ]; then
+            echo "build: NEST_DETACH only drives one target; detaching firmware" >&2
+            exec sh "$repo/bin/container.sh" start firmware
+        fi
+        # One VM round trip per target, in dependency order (the kernel build
+        # also builds the server it embeds).
+        for target in firmware nest-ondevice initramfs; do
+            sh "$repo/bin/container.sh" run "$target" || exit 1
+        done
+        collect_from_vm
+        show_dist
+        ;;
+
+    wait)
+        [ "$via" = container ] || die "wait only applies on macOS (the container path)"
+        target=$(attr_for "${2:-firmware}") || target=${2:-firmware}
+        sh "$repo/bin/container.sh" wait "$target" || exit 1
+        collect_from_vm
+        show_dist
+        ;;
+
+    qemu)
+        [ "$via" = native ] || die "qemu smoke test runs on Linux; on macOS: ./build vm, then NEST_ATTACK_DIR=/nest/attack NEST_LINUX_DIR=/tmp/nest-linux-fixed/Dev/linux sh /src/firmware/qemu-smoke.sh"
+        exec sh "$repo/firmware/qemu-smoke.sh"
+        ;;
+
+    repro)
+        [ "$via" = native ] || die "run the repro check on Linux, or inside the VM: ./build vm then NEST_ATTACK_DIR=/nest/attack sh /src/bin/repro-check.sh"
+        shift
+        if [ "${1:-}" = all ]; then shift; fi
+        exec sh "$repo/bin/repro-check.sh" "$@"
+        ;;
+
+    status)
+        if [ "$via" = container ]; then
+            sh "$repo/bin/container.sh" status || true
+            collect_from_vm
+        fi
+        show_dist
+        ;;
+
+    shell | develop)
+        exec nix develop "$repo"
+        ;;
+
+    clean)
+        rm -rf "$dist"
+        echo "build: removed $dist (nix store untouched; 'nix store gc' to reclaim)"
+        ;;
+
+    help | -h | --help | "")
+        sed -n '2,33p' "$0"
+        ;;
+
+    *)
+        die "unknown verb '$1' (try: firmware|server|initramfs|all|qemu|repro|status|shell|clean)"
+        ;;
+esac

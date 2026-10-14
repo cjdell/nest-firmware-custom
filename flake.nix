@@ -47,8 +47,9 @@
             ];
             shellHook = ''
               echo "nest dev shell — cargo $(cargo --version | cut -d' ' -f2)"
-              echo "server:  cargo build --release"
-              echo "image:   bash bin/macos/build.sh start firmware"
+              echo "server:  ./build server   (or cargo build --release --manifest-path nest-ondevice-server/Cargo.toml)"
+              echo "image:   ./build firmware"
+              echo "compare: ./build repro"
             '';
           };
         }
