@@ -6,6 +6,7 @@
 #   ./build initramfs    # patched initramfs cpio   -> dist/initramfs.cpio
 #   ./build all          # firmware + server + initramfs
 #   ./build ui           # rebuild the schedule SPA bundle -> ui/dist (needs Bun)
+#   ./build ui-dev       # SPA dev server on a fake control API (no thermostat)
 #   ./build qemu         # boot the image under qemu-system-arm, assert HTTP works
 #   ./build test         # the on-device half of the image, against fixtures
 #   ./build repro        # prove the image is host-independent (see below)
@@ -240,6 +241,22 @@ case ${1:-help} in
         echo "ui: ui/dist rebuilt — rebuild the server to embed it (./build server)"
         ;;
 
+    ui-dev)
+        # Dev server for the SPA: src/ served against an in-memory fake of the
+        # control API (ui/dev.ts + ui/mock.ts). No thermostat, no Rust server, no
+        # nix — and no watcher process either: the bundle is rebuilt on request
+        # when anything under src/ changed, so refresh is the loop.
+        uidir=$repo/nest-ondevice-server/ui
+        bunbin=$uidir/node_modules/.bin/bun
+        [ -x "$bunbin" ] || bunbin=$(command -v bun || true)
+        [ -n "$bunbin" ] || die "bun not found: install it (https://bun.sh), or npm i -D bun in $uidir"
+        if [ ! -d "$uidir/node_modules" ]; then
+            echo "ui: installing dependencies (npm ci)"
+            (cd "$uidir" && npm ci) || die "npm ci failed"
+        fi
+        (cd "$uidir" && exec "$bunbin" run dev.ts)
+        ;;
+
     qemu)
         [ "$via" = native ] || die "qemu smoke test runs on Linux; on macOS: ./build vm, then NEST_ATTACK_DIR=/nest/attack NEST_LINUX_DIR=/tmp/nest-linux-fixed/Dev/linux sh /src/firmware/qemu-smoke.sh"
         exec sh "$repo/firmware/qemu-smoke.sh"
@@ -284,6 +301,6 @@ case ${1:-help} in
         ;;
 
     *)
-        die "unknown verb '$1' (try: firmware|server|initramfs|all|qemu|test|repro|status|shell|clean)"
+        die "unknown verb '$1' (try: firmware|server|initramfs|all|ui|ui-dev|qemu|test|repro|status|shell|clean)"
         ;;
 esac

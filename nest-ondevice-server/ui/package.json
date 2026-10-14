@@ -6,6 +6,8 @@
   "description": "Minimal Solid.js SPA for editing the Nest weekly schedule; embedded into the nest-ondevice binary",
   "scripts": {
     "build": "bun run build.ts",
+    "dev": "bun run dev.ts",
+    "test": "bun run test/run.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

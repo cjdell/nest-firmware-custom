@@ -204,7 +204,11 @@ and are never given one.
 
 The editor itself is a Solid.js + TypeScript SPA built by Bun and embedded in the
 binary — see [`ui/README.md`](ui/README.md) for the build, the data model and what
-is still unproven about device adoption.
+is still unproven about device adoption. To work on it without a thermostat, run
+it against the in-memory fake in `ui/mock.ts`:
+`./build ui-dev` (or `just ui-dev`) serves the app from `src/`, rebuilds on
+refresh, and `POST /mock/clobber` lets the fake dial overwrite your save so the
+revision race is testable on a laptop.
 
 ## Caveats
 

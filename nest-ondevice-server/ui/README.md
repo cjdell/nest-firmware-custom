@@ -27,6 +27,45 @@ bun run test/run.ts # happy-dom render test (24 assertions)
 bun x tsc --noEmit  # types
 ```
 
+## Dev server (no thermostat, no Rust server)
+
+```sh
+./build ui-dev      # == bun run dev.ts  ->  http://127.0.0.1:8083
+just ui-dev         # same thing through the justfile
+```
+
+`dev.ts` serves the app **from `src/`** against `mock.ts`, an in-memory fake of
+the control API. There is no watcher process: every request for the bundle
+compares the mtimes under `src/` and rebuilds if anything changed, so editing a
+`.tsx` and hitting refresh is the whole loop. The dev bundle is unminified with
+inline sourcemaps, and a build error is served as
+`throw new Error("src/App.tsx: Unexpected token (393:6) …")` so the code frame
+lands in the browser console instead of a blank page.
+
+Options are env vars: `DEV_PORT=8083 DEV_SCALE=F DEV_RANGE=1 DEV_EMPTY=1
+DEV_LEARNING=1` — scale changes the dial's display unit only (the wire stays
+Celsius), `DEV_RANGE` fakes a heat+cool unit so the RANGE UI is reachable, and
+`DEV_EMPTY` starts with an empty bucket (the "device never rebooted" case).
+
+The fake is deliberately faithful to `src/control.rs`: the bucket is stored
+device-native (dict-of-dicts), `set_schedule` is a full replacement that bumps
+`object_revision` and stamps `object_timestamp`, unknown top-level fields
+survive, and validation mirrors `cmd_set_schedule` and answers
+`400 {success:false,message}`. On top of that it can simulate the two things
+only the real dial does — and that the editor has to survive:
+
+```sh
+curl -XPOST localhost:8083/mock/clobber   # dial re-publishes its own schedule
+curl -XPOST localhost:8083/mock/learn     # learning mode invents a setpoint
+curl -XPOST localhost:8083/mock/empty     # bucket empty ("never rebooted")
+curl -XPOST localhost:8083/mock/reset     # back to the published fixture
+curl       localhost:8083/mock/state      # bucket + revision + commands seen
+```
+
+What it cannot prove is the one thing that actually matters: that the dial
+*adopts* a pushed schedule (see `../README.md` and AGENTS.md trap 29). The mock
+always accepts.
+
 `dist/` is **committed** and `node_modules/` is not. The Nix build has no Bun,
 and the firmware image must stay bit-reproducible, so the bundle is vendored
 here the same way the patched Hubitat Groovy is vendored in `hubitat/`: edit

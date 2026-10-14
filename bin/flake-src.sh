@@ -26,10 +26,15 @@ nix eval --impure --raw --expr "
       let b = baseNameOf p;
       in !(
            builtins.elem b [
-             \".git\" \".direnv\" \".venv\" \"dist\" \"target\" \"node_modules\"
+             \".git\" \".direnv\" \".venv\" \"target\" \"node_modules\"
              \"__pycache__\" \"NestDFUAttack\" \"NoLongerEvil-SelfHosted\"
              \"NoLongerEvil-Thermostat\" \"hubitatcontrol\"
            ]
+           # Only the *root* dist/, where ./build drops artifacts. A basename
+           # match here also ate nest-ondevice-server/ui/dist, which is tracked
+           # and read by the flake's fileset (the embedded SPA) — the firmware
+           # derivation then failed to evaluate at all.
+           || p == \"$src/dist\"
            # ./result and ./result-* are symlinks into the store
            || t == \"symlink\"
            || builtins.match \"result.*\" b != null
