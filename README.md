@@ -27,6 +27,7 @@ git submodule update --init NestDFUAttack   # fresh clone only
 ./build initramfs    # the patched initramfs      -> dist/initramfs.cpio
 ./build all          # all three
 ./build qemu         # boot the image under qemu-system-arm, assert HTTP works
+./build test         # the on-device half of the image, against fixtures
 ./build repro        # prove the image is host-independent (see below)
 ./build status       # dist/ listing + checksums
 ./build shell        # nix develop (cargo + python for the server)
@@ -46,18 +47,18 @@ clock, the build user/host, the `.config` stamp and the uImage header time — s
 
 ```sh
 ./build repro
-# baseline        c6cd02cac3fa8817…  reference   (the uImage)
-# rebuild         c6cd02cac3fa8817…  identical   (forced rebuild, fresh TMPDIR)
-# qemu-toolchain  c6cd02cac3fa8817…  identical   (the container's qemu-i386 path)
-# jobs1           c6cd02cac3fa8817…  identical   (make -j1 vs -j32)
-# kernel-git      c6cd02cac3fa8817…  identical   (kernel via git archive, as on macOS)
+# baseline        123bd52b0fea6732…  reference   (the uImage)
+# rebuild         123bd52b0fea6732…  identical   (forced rebuild, fresh TMPDIR)
+# qemu-toolchain  123bd52b0fea6732…  identical   (the container's qemu-i386 path)
+# jobs1           123bd52b0fea6732…  identical   (make -j1 vs -j32)
+# kernel-git      123bd52b0fea6732…  identical   (kernel via git archive, as on macOS)
 # server-a        ca738fe2e280d35b…  reference   (the Rust binary inside the image)
 # server-b        ca738fe2e280d35b…  identical   (built again, different TMPDIR)
 ```
 
 So after cloning on the Mac, `./build firmware` and compare
 `sha256sum dist/uImage` with the number above (or with the Linux build's):
-`c6cd02cac3fa8817a9896b5f2f57685bbc2e8d239c9a5509592671f912fa4ded` for this
+`123bd52b0fea673248981f1100eaf576e432894e039f9581bca7fcaa48ea24cf` for this
 revision, and `ca738fe2e280d35be12c1e011fb866b2c7d69d42812ac20f2178a3a440a52ecd`
 for the ARM server binary inside it. `REPRO_FRESH=1 ./build repro` forces the
 rebuilds instead of reusing what nix already has.
@@ -110,7 +111,10 @@ firmware/
   default.nix                 # kernel + qemu-i386 toolchain wrappers + uImage
   mkcompile_h                 # deterministic replacement for the kernel's build identity
   inject_initramfs.py         # archive-level server injection + rootme patch
+  rootfs-install.sh           # what runs on the device: the persistent half of the image
+  nosleep.init                # /etc/init.d/nosleep — keeps suspend off (trap 14)
   nest-ondevice.init          # on-device /etc/init.d script
+  test-image.sh               # runs both on-device halves against fixtures
   qemu-smoke.sh               # boot the image under qemu-system-arm
   README.md                   # build/flash notes, determinism, constraints
 nest-ondevice-server/         # the Rust server

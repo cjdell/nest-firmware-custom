@@ -98,12 +98,16 @@ device nodes). It:
 1. copies every existing entry byte-for-byte, including each device node's
    major/minor (they used to be zeroed — masked on-device by devtmpfs, but
    fatal to an initramfs that relies on its static `/dev`),
-2. adds `/usr/bin/nest-ondevice`, `/etc/init.d/nest-ondevice`, and
-   `/etc/monit.d/nest-ondevice.monitrc`,
+2. adds five files: `/usr/bin/nest-ondevice` (the server),
+   `/etc/init.d/nest-ondevice` (its init script), `/etc/init.d/nosleep`
+   (`firmware/nosleep.init`, the suspend kill-switch),
+   `/etc/init.d/nest-ondevice-install` (`firmware/rootfs-install.sh`, the
+   flash-root installer) and `/etc/monit.d/nest-ondevice.monitrc`,
 3. patches `/etc/init.d/rootme` — the script that installs persistent files to
-   `mtdblock7` — **before** it runs `umount /tmp/1`, so the server, its init
-   script and the monit config are copied to the flash and
-   `${INITDIR}/nest-ondevice start` is appended to `rcS`.
+   `mtdblock7` — with one line, `sh /etc/init.d/nest-ondevice-install`, inserted
+   **before** its `umount /tmp/1`, so the install happens on the flash and not in
+   the initramfs tmpfs (AGENTS.md trap 5). Re-injecting an already-injected cpio
+   updates those entries in place rather than appending a second copy.
 
 The kernel's `CONFIG_INITRAMFS_SOURCE="../initramfs_data.cpio"` then embeds the
 patched cpio, and `mkimage` produces the `uImage`.
@@ -111,6 +115,46 @@ patched cpio, and `mkimage` produces the `uImage`.
 At runtime `nest-ondevice` listens on the device port (default 8000) and the
 control port (default 8082) with state under `/media/data/nest-ondevice`; see
 `../nest-ondevice-server/README.md`.
+
+### What the installer changes on the flash root
+
+`firmware/rootfs-install.sh` is the whole persistent half of the image: the
+on-device fixes that were first applied by hand to the unit at `192.168.1.2`
+(AGENTS.md traps 14/15) are now part of a flash. It copies the server, its init
+script, `nosleep` and its monit config to `mtdblock7`, includes the monit config
+from `/etc/monitrc`, and then:
+
+| Change | Why |
+|---|---|
+| delete `/bin/sshconnect` from `rcS`, de-dupe `/bin/dropbear` | the autossh loop never returns, so `rcS` stopped before the server started (trap 11) |
+| comment `${INITDIR}/nlsleep start` in `rcS` and the `check process nlsleepd` block in `/etc/monit.d/nlscpm.monitrc`; add `${INITDIR}/nosleep start` | `nlsleepd` deep-sleeps the SoC when the display sleeps and the LAN server goes down with the radio (trap 14). `nlshutdownd` is deliberately left supervised — it is the shutdown path |
+| comment `${INITDIR}/nlsleep stop` in `rcH` | with `nlsleepd` unmonitored, `monit stop nlsleepd` always fails and `rcH` retries for 1+3+9+27+81+243 s, so a reboot looks like it does nothing (trap 15). Commenting the *call* rather than editing `nlsleep`'s `stop)` case is deliberate: `nlsleep` is a file the installer cannot read while it writes, and an `exit 0` inserted blind near its top would also end `rcH` if `rcH` sourced it |
+| set the diagnostic `root` line in `/etc/shadow` | this is a diagnostic image; drop that block before treating a flash as anything else |
+
+It is guarded and idempotent — rootme runs on every boot taken through the DFU
+image, so re-running is the recovery path for an interrupted flash — it never
+fails the boot (every edit is skipped when the file it wants is absent, and a
+root that is not mounted is a no-op), and it logs what it decided to
+`/etc/nest-ondevice-install.log` on the flash root, because it runs blind.
+`NEST_ROOT` is the tree to install into and `NEST_SRC` where the initramfs files
+come from, which is what makes it testable off-device.
+
+### Testing the on-device half without a thermostat
+
+```sh
+./build test
+```
+
+Suite 1 runs the installer against a fixture that imitates the factory flash
+root — the real one is not in this repo, `NestDFUAttack/Dev/root` is an older
+dump with no `nlsleep` at all — twice, and checks both what it changes and that
+the second run changes nothing (including that a line someone already disabled
+by hand does not get marked twice, and that `nlshutdownd` survives). Suite 2
+runs the injector against a synthetic cpio and checks the embedded modes, that
+rootme calls the installer before it unmounts the flash (trap 5), and that
+`/dev/console` keeps major/minor 1,3 (trap 6). Suite 3, if a built initramfs is
+around (`./build initramfs`, or `NEST_INITRAMFS=path ./build test`), extracts the
+installer from that image and runs *that* against the fixture.
 
 ## Observability on the device
 
@@ -181,6 +225,7 @@ One entry point, both hosts:
 ./build initramfs     # -> dist/initramfs.cpio (the intermediate cpio)
 ./build all           # firmware + server + initramfs
 ./build qemu          # boot the image under qemu-system-arm and assert HTTP works
+./build test          # the on-device half of the image, against fixtures
 ./build repro         # prove the image is host-independent (see next section)
 ./build status        # what is in dist/, with checksums
 ./build clean         # remove dist/
@@ -255,10 +300,29 @@ Use the existing `NestDFUAttack` flow (`Dev/build.sh`, `omap3_usbload`, the
 does not flash anything; `AGENTS.md` records the procedure used on the unit at
 `192.168.1.2`.
 
+After a flash, the installer's own record is on the flash root — read that
+before debugging anything else:
+
+```sh
+nssh cat /etc/nest-ondevice-install.log     # what it changed, and what it skipped
+nssh 'cat /sys/kernel/debug/pm_debug/enable_off_mode \
+        /sys/kernel/debug/pm_debug/sleep_while_idle \
+        /sys/kernel/debug/pm_debug/voltage_off_while_idle'   # want 0 0 0
+nssh monit\ summary                          # want nlsleepd gone, nlshutdownd kept
+nssh 'grep -c DISABLED-by-nest-ondevice /etc/init.d/rcS /etc/init.d/rcH /etc/monit.d/nlscpm.monitrc'
+```
+
+The image carrying the traps 14/15 fixes (`uImage` sha256 starting
+`123bd52b0fea`) was built and reproducible-checked but **not yet flashed** — the
+unit was unreachable off-site. The unit at `192.168.1.2` runs the older image
+plus the hand-applied fixes, which the installer detects and leaves alone.
+
 ## Verify before flashing
 
 ```sh
-sha256sum -c uImage.sha256      # and compare the sha256 with the other build host
+sha256sum -c uImage.sha256   # and compare the sha256 with the other build host
+./build test                 # = firmware/test-image.sh: the on-device half, against
+                             # fixtures — no thermostat needed
 ```
 
 The initramfs inside the image should contain the server:

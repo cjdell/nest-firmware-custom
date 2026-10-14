@@ -157,7 +157,9 @@ EOF
       else
         throw "NEST_TOOLCHAIN must be auto|native|qemu, got '${toolchainFlavour}'";
 
-    # Base initramfs + the server binary + its init script.
+    # Base initramfs + the server binary + its init script + the flash-root
+    # installer and the suspend kill-switch (both run on the device, and the
+    # installer is unit-tested against a fixture by firmware/test-image.sh).
     initramfs = pkgs.runCommand "nest-initramfs" {
       nativeBuildInputs = [ pkgs.python3 ];
     } ''
@@ -166,7 +168,9 @@ EOF
         ${attack.initramfs} "$out/initramfs.cpio" \
         ${nest-ondevice}/bin/nest-ondevice \
         ${./nest-ondevice.init} \
-        ${./nest-ondevice.monitrc}
+        ${./nest-ondevice.monitrc} \
+        ${./rootfs-install.sh} \
+        ${./nosleep.init}
     '';
 
     firmware = pkgs.stdenv.mkDerivation {

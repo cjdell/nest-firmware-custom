@@ -6,7 +6,12 @@ nodes and symlinks) are copied verbatim, so no root/`mknod` is required. That
 matters because Nix builds run unprivileged and cannot recreate /dev entries.
 
 Usage:
-  inject_initramfs.py BASE.cpio OUT.cpio BINARY INIT_SCRIPT MONITRC
+  inject_initramfs.py BASE.cpio OUT.cpio BINARY INIT_SCRIPT MONITRC INSTALLER NOSLEEP
+
+The installer (firmware/rootfs-install.sh) and nosleep (firmware/nosleep.init)
+ship as files in the initramfs; rootme only gets a one-line call, so the logic
+is a real script we can run against a fixture instead of a string baked into an
+archive. ./build test (firmware/test-image.sh) does exactly that.
 """
 import sys
 
@@ -54,39 +59,12 @@ def emit(entry):
 
 INSTALL_BLOCK = b"""
 # --- nest-ondevice (injected by the nest-ondevice flake) ---
-mkdir -p /tmp/1/usr/bin
-cp /usr/bin/nest-ondevice /tmp/1/usr/bin/nest-ondevice 2>/dev/null || true
-chmod 755 /tmp/1/usr/bin/nest-ondevice 2>/dev/null || true
-cp /etc/init.d/nest-ondevice /tmp/1/etc/init.d/nest-ondevice 2>/dev/null || true
-chmod 755 /tmp/1/etc/init.d/nest-ondevice 2>/dev/null || true
-# monit config: the init script starts monit when present, and this must live on
-# the flash rootfs (mtdblock7) so it survives the initramfs -> flash reboot.
-mkdir -p /tmp/1/etc/monit.d
-cp /etc/monit.d/nest-ondevice.monitrc /tmp/1/etc/monit.d/nest-ondevice.monitrc 2>/dev/null || true
-# The GTVHacker rootme appends `/bin/sshconnect` (an infinite autossh loop) to
-# rcS. It runs in the foreground and blocks rcS forever, so anything appended
-# after it -- including this server -- never starts. Drop it, de-dupe dropbear,
-# then make sure our start line is present.
-if [ -f /tmp/1/etc/init.d/rcS ]; then
-  sed -i '/\/bin\/sshconnect/d' /tmp/1/etc/init.d/rcS
-  awk '!(/^\/bin\/dropbear$/ && seen++)' /tmp/1/etc/init.d/rcS > /tmp/1/etc/init.d/rcS.nle
-  mv /tmp/1/etc/init.d/rcS.nle /tmp/1/etc/init.d/rcS
-  if ! grep -q 'nest-ondevice start' /tmp/1/etc/init.d/rcS; then
-    echo '${INITDIR}/nest-ondevice start' >> /tmp/1/etc/init.d/rcS
-  fi
-fi
-# monit reads /etc/monitrc at boot; add our include so the daemon is supervised.
-if [ -f /tmp/1/etc/monitrc ] && ! grep -q 'nest-ondevice.monitrc' /tmp/1/etc/monitrc; then
-  echo 'include /etc/monit.d/nest-ondevice.monitrc' >> /tmp/1/etc/monitrc
-fi
-# --- temporary diagnostic access: known root password ---
-if [ -f /tmp/1/etc/shadow ]; then
-  grep -v '^root:' /tmp/1/etc/shadow > /tmp/1/etc/shadow.nle
-  echo 'root:neID3wejfFjiA:16243:0:99999:7:::' >> /tmp/1/etc/shadow.nle
-  mv /tmp/1/etc/shadow.nle /tmp/1/etc/shadow
-  chmod 600 /tmp/1/etc/shadow
-fi
-
+# Everything this image changes on the flash root lives in
+# /etc/init.d/nest-ondevice-install (firmware/rootfs-install.sh): idempotent,
+# guarded, and logged to /etc/nest-ondevice-install.log on the flash root. It
+# must run before the umount below, or the writes land in the initramfs tmpfs
+# and vanish (AGENTS.md trap 5).
+sh /etc/init.d/nest-ondevice-install
 # --- end nest-ondevice ---
 """
 
@@ -114,7 +92,8 @@ def patch_rootme(body):
 
 
 def main():
-    base_path, out_path, bin_path, init_path, monitrc_path = sys.argv[1:6]
+    (base_path, out_path, bin_path, init_path, monitrc_path,
+     installer_path, nosleep_path) = sys.argv[1:8]
     with open(base_path, "rb") as fh:
         entries = parse(fh.read())
     with open(bin_path, "rb") as fh:
@@ -123,6 +102,19 @@ def main():
         init = fh.read()
     with open(monitrc_path, "rb") as fh:
         monitrc = fh.read()
+    with open(installer_path, "rb") as fh:
+        installer = fh.read()
+    with open(nosleep_path, "rb") as fh:
+        nosleep = fh.read()
+
+    payload = (
+        ("usr/bin/nest-ondevice", 0o100755, binary),
+        ("etc/init.d/nest-ondevice", 0o100755, init),
+        ("etc/init.d/nest-ondevice-install", 0o100755, installer),
+        ("etc/init.d/nosleep", 0o100755, nosleep),
+        ("etc/monit.d/nest-ondevice.monitrc", 0o100644, monitrc),
+    )
+    wanted = {name: (mode, body) for name, mode, body in payload}
 
     next_ino = 0x10000
     for e in entries:
@@ -130,26 +122,28 @@ def main():
             next_ino = e[0] + 1
 
     out = []
-    replaced = False
+    patched_rootme = False
     for e in entries:
         name = e[6]
         if name == "etc/init.d/rootme":
             e[7] = patch_rootme(e[7])
-            replaced = True
-            out.append(emit(e))
-        elif name == "TRAILER!!!":
-            # add our files just before the trailer
-            out.append(emit([next_ino, 0o100755, 0, 0, 1, 0, "usr/bin/nest-ondevice", binary, 0, 0]))
-            next_ino += 1
-            out.append(emit([next_ino, 0o100755, 0, 0, 1, 0, "etc/init.d/nest-ondevice", init, 0, 0]))
-            next_ino += 1
-            out.append(emit([next_ino, 0o100644, 0, 0, 1, 0, "etc/monit.d/nest-ondevice.monitrc", monitrc, 0, 0]))
-            next_ino += 1
+            patched_rootme = True
+        elif name in wanted:
+            # Injecting into an image we already built: update the existing
+            # entry where it sits instead of adding a second copy of the path.
+            e[1], e[7] = wanted[name]
+            del wanted[name]
+        if name != "TRAILER!!!":
             out.append(emit(e))
         else:
+            # Anything still missing goes in just before the trailer.
+            for path, mode, body in payload:
+                if path in wanted:
+                    out.append(emit([next_ino, mode, 0, 0, 1, 0, path, body, 0, 0]))
+                    next_ino += 1
             out.append(emit(e))
 
-    if not replaced:
+    if not patched_rootme:
         raise SystemExit("base initramfs has no etc/init.d/rootme")
 
     with open(out_path, "wb") as fh:

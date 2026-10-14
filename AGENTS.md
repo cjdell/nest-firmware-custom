@@ -17,7 +17,10 @@ image embeds the server, and the whole path (flash -> first-boot install -> app
 talks to `127.0.0.1:8000` -> Hubitat can reach `:8082`) has been validated on
 hardware. Four on-hardware bugs/behaviours were found and fixed (traps 11-14):
 suspend is now disabled persistently, so the LAN server stays reachable (remote
-reboot caveat: trap 15). Hubitat is installed at `192.168.1.3` (driver id 940,
+reboot caveat: trap 15) — and those last two fixes are now **part of the image**
+(`firmware/rootfs-install.sh`, exercised by `./firmware/test-image.sh`), so a
+fresh flash needs no hand-editing; the unit at `.2` keeps its hand-applied copy.
+Hubitat is installed at `192.168.1.3` (driver id 940,
 device 16 label `Hallway Thermostat`), and the Nest now sits on the reserved
 `192.168.1.2` — see `hubitat/README.md` and traps 16-17.
 
@@ -67,6 +70,7 @@ git submodule update --init NestDFUAttack   # fresh clone only
 ./build initramfs    # -> dist/initramfs.cpio
 ./build all          # all three
 ./build qemu         # boot under qemu-system-arm (RealView PB-A8), assert HTTP
+./build test         # the on-device half of the image, against fixtures
 ./build repro        # rebuild under every host-dependent difference; compare bytes
 ./build status       # dist/ listing + checksums
 ./build shell        # nix develop (cargo + python)
@@ -80,6 +84,7 @@ Lower level, when you need it:
 export NEST_ATTACK_DIR=$PWD/NestDFUAttack
 nix build --impure .#firmware            # -> uImage in the store
 nix build --impure .#initramfs           # -> initramfs.cpio
+./firmware/test-image.sh                 # the on-device half, against fixtures
 nix build .#nest-ondevice                # server only, any system
 NEST_SRC=$PWD NEST_OUT=$PWD/dist NEST_ATTACK=$attack sh bin/nix-build.sh firmware
 
@@ -97,7 +102,7 @@ python3 nest-ondevice-server/test_smoke.py
 
 **Verified reproducible build (2026-10-14).** Native x86_64-linux
 (`zen3-nixos`), `./build repro`: `uImage` sha256
-`c6cd02cac3fa8817a9896b5f2f57685bbc2e8d239c9a5509592671f912fa4ded`, 7,293,500
+`123bd52b0fea673248981f1100eaf576e432894e039f9581bca7fcaa48ea24cf`, 7,298,616
 bytes, ~**30 s** per build with the native
 i686 toolchain (~4 min under `qemu-i386`, which produces the same bytes).
 Before the determinism work two builds of the *same* tree on this machine
@@ -241,9 +246,11 @@ in **`hubitat/README.md`**.
     appends `/bin/dropbear` and `/bin/sshconnect` to the *flash* `rcS`.
     `sshconnect` is a `while true; sleep 600` autossh loop that runs in the
     foreground, so every line after it — including the injected
-    `${INITDIR}/nest-ondevice start` — never runs. `inject_initramfs.py` now
+    `${INITDIR}/nest-ondevice start` — never runs. `firmware/rootfs-install.sh`
+    (embedded as `/etc/init.d/nest-ondevice-install`, called by rootme) now
     deletes `/bin/sshconnect`, de-dupes `/bin/dropbear`, and adds the monit
-    include before appending the start line. Symptom of the pre-fix image:
+    include before appending the start line — `./firmware/test-image.sh` checks
+    it. Symptom of the pre-fix image:
     Dropbear is up but nothing listens on `:8000`/`:8082`, and `rcS` (pid 56) is
     parked in `sleep`.
 
@@ -281,6 +288,15 @@ in **`hubitat/README.md`**.
     sleep'` is `0`. Removing `nlsleepd` from monit breaks the shutdown stop path
     — see trap 15.
 
+    **Now part of the image** (2026-10-14): `firmware/rootfs-install.sh` does all
+    of that during a flash and `firmware/nosleep.init` is the `/etc/init.d/nosleep`
+    it installs, so a fresh unit needs no SSH. The unit at `192.168.1.2` still has
+    the hand-applied version; the installer is idempotent and uses the same
+    `DISABLED-by-nest-ondevice` markers, so re-flashing over it is fine. That
+    image (`uImage` sha256 `123bd52b0fea…`, `./build repro` clean) is **not
+    flashed yet** — the unit was unreachable off-site; check
+    `/etc/nest-ondevice-install.log` on the flash root after the next flash.
+
 15. **A "graceful" `/sbin/reboot` can hang ~6 minutes in `rcH`.** busybox init
     runs `::shutdown:/etc/init.d/rcH`, which calls `${INITDIR}/nlsleep stop`.
     That goes through `monit_service_action stop nlsleepd` in `/etc/init.d/dm`,
@@ -294,6 +310,14 @@ in **`hubitat/README.md`**.
     the `/bin/sleep` child of the running `/etc/init.d/nlsleep stop` (the loop
     then hits its `retry == 5` break and `rcH` continues), or
     `ssh root@… /sbin/reboot -f` (sync + `reboot(2)`, skips `rcH`).
+
+    **Now part of the image** (2026-10-14): `firmware/rootfs-install.sh` comments
+    the `${INITDIR}/nlsleep stop` line in `rcH` rather than editing `nlsleep`'s
+    `stop)` case — the installer cannot read `nlsleep` while it writes, and an
+    `exit 0` inserted blind near its top would also end `rcH` if `rcH` sourced it.
+    With `nlsleepd` unmonitored and never started there is nothing left for that
+    call to stop. The hand-applied `/etc/init.d/nlsleep` edit on `192.168.1.2`
+    stays and is harmless once the call is commented.
 
 16. **The Vodafone router's static-DHCP "UPDATE" silently no-ops; use DELETE+ADD.**
     Router is a Vodafone Power Hub / Sagemcom at `http://192.168.1.1` (user
@@ -408,7 +432,12 @@ firmware/
   default.nix                 qemu-i386 toolchain wrappers + kernel make + mkimage
   mkcompile_h                 deterministic replacement for the kernel's build-identity generator
   inject_initramfs.py         archive-level injection + rootme patch (order-sensitive)
+  rootfs-install.sh           the persistent half of the image: what runs on the device (traps 5/11/14/15)
+  nosleep.init                /etc/init.d/nosleep — clears the pm_debug suspend knobs (trap 14)
   nest-ondevice.init          on-device /etc/init.d script, installed to /usr/bin
+  nest-ondevice.monitrc       monit supervision for the daemon
+  test-image.sh               exercises both on-device halves against fixtures (no thermostat)
+  qemu.nix, qemu-init.sh, inject_qemu_init.py, qemu-smoke.sh   RealView PB-A8 smoke test
   README.md                   constraints/traps/verify (the long form of this file)
 nest-ondevice-server/         Rust server (src/, Cargo.*, test_smoke.py, deploy/)
 hubitat/

@@ -6,6 +6,7 @@
 #   ./build initramfs    # patched initramfs cpio   -> dist/initramfs.cpio
 #   ./build all          # firmware + server + initramfs
 #   ./build qemu         # boot the image under qemu-system-arm, assert HTTP works
+#   ./build test         # the on-device half of the image, against fixtures
 #   ./build repro        # prove the image is host-independent (see below)
 #   ./build status       # what is in dist/, with checksums
 #   ./build shell        # nix develop (cargo + python for the server)
@@ -143,6 +144,14 @@ case ${1:-help} in
         exec sh "$repo/firmware/qemu-smoke.sh"
         ;;
 
+    test)
+        # The checks that need no thermostat: firmware/test-image.sh runs the two
+        # halves that execute on the device (the flash-root installer and the
+        # initramfs injector) against fixtures. The server's own smoke test needs
+        # a host-built server running — AGENTS.md § "Build & verify".
+        exec "$repo/firmware/test-image.sh"
+        ;;
+
     repro)
         [ "$via" = native ] || die "run the repro check on Linux, or inside the VM: ./build vm then NEST_ATTACK_DIR=/nest/attack sh /src/bin/repro-check.sh"
         shift
@@ -168,10 +177,12 @@ case ${1:-help} in
         ;;
 
     help | -h | --help | "")
-        sed -n '2,33p' "$0"
+        # The header comment is the documentation; print it without hard-coding
+        # a line range that shifts every time a verb is added.
+        awk 'NR == 1 { next } /^set -eu/ { exit } { print }' "$0"
         ;;
 
     *)
-        die "unknown verb '$1' (try: firmware|server|initramfs|all|qemu|repro|status|shell|clean)"
+        die "unknown verb '$1' (try: firmware|server|initramfs|all|qemu|test|repro|status|shell|clean)"
         ;;
 esac

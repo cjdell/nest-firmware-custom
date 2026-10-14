@@ -1,0 +1,68 @@
+#!/bin/sh
+# nosleep — keep the SoC out of RAM suspend so the LAN server stays reachable.
+#
+# Why this exists: nlsleepd (supervised from /etc/monit.d/nlscpm.monitrc) sets
+# enable_off_mode / sleep_while_idle / voltage_off_while_idle, the OMAP3 then
+# deep-sleeps when the display sleeps, the Wi-Fi radio goes with it, and
+# :8000/:8082 stop answering until someone touches the screen. A thermostat
+# acting as a permanent LAN endpoint cannot have that. AGENTS.md trap 14.
+#
+# Written to be called from rcS on every boot and to be safe when nothing is
+# there: debugfs may not be mounted yet, and the knobs may not exist on another
+# board or kernel. Never fails, never blocks.
+#
+# This is deliberately one-directional: `stop` does not re-enable suspend,
+# because the failure mode we are removing is worse than the one we might want
+# back. To undo it for a one-off experiment:
+#   mount -t debugfs none /sys/kernel/debug
+#   for k in enable_off_mode sleep_while_idle voltage_off_while_idle; do
+#     echo 1 > /sys/kernel/debug/pm_debug/$k; done
+# and restart nlsleepd.
+
+DBG=/sys/kernel/debug/pm_debug
+KNOBS="enable_off_mode sleep_while_idle voltage_off_while_idle"
+
+mount_debug() {
+    [ -d "$DBG" ] && return 0
+    mount -t debugfs none /sys/kernel/debug 2>/dev/null
+    return $?
+}
+
+case "$1" in
+    stop)
+        echo "nosleep: leaving suspend disabled (see this file for how to undo)"
+        exit 0
+        ;;
+    status)
+        if [ -d "$DBG" ]; then
+            for k in $KNOBS; do
+                if [ -r "$DBG/$k" ]; then
+                    echo "nosleep: $k = $(cat "$DBG/$k" 2>/dev/null)"
+                else
+                    echo "nosleep: $k missing"
+                fi
+            done
+        else
+            echo "nosleep: $DBG not present"
+        fi
+        exit 0
+        ;;
+esac
+
+if ! mount_debug; then
+    echo "nosleep: no debugfs, leaving suspend alone"
+    exit 0
+fi
+
+if [ ! -d "$DBG" ]; then
+    echo "nosleep: no $DBG, nothing to do"
+    exit 0
+fi
+
+for k in $KNOBS; do
+    if [ -w "$DBG/$k" ]; then
+        echo 0 > "$DBG/$k"
+        echo "nosleep: $k -> 0"
+    fi
+done
+exit 0
