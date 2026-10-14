@@ -8,10 +8,11 @@ doc), so the thermostat is self-contained and Hubitat talks to it on the LAN.
 
 **Repo state (2026-10-13).** Committed, and **now running on real hardware** — a
 2nd-gen UK/Heat-Link unit, serial `02AA01AC2614065C`, flashed over the OMAP3
-BootROM DFU path. `NestDFUAttack/` is pinned as a git submodule at **our fork**,
-`cjdell/NestDFUAttack` branch `nest-ondevice` (started at upstream
-`exploiteers/NestDFUAttack` 930b834b; the exact commit is in the index,
-`ignore = dirty` because a macOS checkout collapses its case-only paths). The build is green, the
+BootROM DFU path. `NestDFUAttack/` is pinned as a git submodule at upstream
+`exploiteers/NestDFUAttack` and carries **no patches of ours** — every change we
+make to it happens to a copy at build time (trap 22) — so the gitlink is still
+upstream's only commit, 930b834b (`ignore = dirty` because a macOS checkout
+collapses its case-only paths). The build is green, the
 image embeds the server, and the whole path (flash -> first-boot install -> app
 talks to `127.0.0.1:8000` -> Hubitat can reach `:8082`) has been validated on
 hardware. Four on-hardware bugs/behaviours were found and fixed (traps 11-14):
@@ -381,11 +382,28 @@ in **`hubitat/README.md`**.
     either port already answers; if you ever see five PASS lines with no guest
     dmesg in the log tail, that is what happened.
 
+22. **We change the vendored tree without patching it, and `Dev/linux` edits in
+    the checkout are silently ignored.** `NestDFUAttack/` stays at upstream
+    930b834b with no commits of ours; the changes are applied to a *copy* at
+    build time — `scripts/mkcompile_h` and the `timeconst.pl` Perl fix
+    (`firmware/default.nix:222`, `:230`), the `realview` config toggles
+    (`firmware/qemu.nix:89-100`), the initramfs injection
+    (`firmware/inject_initramfs.py`), the toolchain wrappers
+    (`firmware/default.nix:98-132`). The flashable config is `gtvhacker_defconfig`
+    as shipped. The asymmetry bites: `bin/nix-build.sh` re-materialises
+    `Dev/linux` with `git archive HEAD` (case-exactness + reproducibility), so an
+    uncommitted kernel edit never reaches the build — whereas
+    `Dev/initramfs_data.cpio` and `Dev/toolchain/arm-2008q3` are read straight
+    from the checkout and take effect immediately. To try a kernel change: commit
+    it in a fork and move the gitlink, or point `NEST_LINUX_DIR` at your own tree
+    for a throwaway. A fork was made and dropped for exactly this reason — with
+    no delta in it, it only added a place for the build to drift.
+
 ## Layout
 
 ```
 flake.nix                     deps + packages (nest-ondevice, firmware, initramfs) + devShell
-.gitmodules                   pins NestDFUAttack/ to cjdell/NestDFUAttack @ nest-ondevice
+.gitmodules                   pins NestDFUAttack/ to upstream exploiteers/NestDFUAttack (unpatched)
 firmware/
   default.nix                 qemu-i386 toolchain wrappers + kernel make + mkimage
   mkcompile_h                 deterministic replacement for the kernel's build-identity generator
