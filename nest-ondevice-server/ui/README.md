@@ -10,20 +10,57 @@ listener.
 src/index.html   the shell (hand-written, copied to dist/ verbatim)
 src/index.tsx    mount
 src/App.tsx      state, loading, save, toolbar, learning-mode switch
-src/DayRow.tsx   one weekday: timeline, setpoint rows, copy-from-day
+src/DayRow.tsx   one weekday: timeline of temperature dots, folded setpoint rows, copy-from-day
 src/model.ts     the wire format, normalisation, validation, time/temp helpers
 src/api.ts       fetch wrappers (same origin, relative paths)
 src/app.css      styling (dark, mobile-first)
 test/render.tsx  mounts the real <App/> against a stubbed API and asserts it works
 ```
 
+## Editing a day
+
+Each day is a 24-hour **timeline of dots, and the temperature is written inside
+each dot** (a `RANGE` shows `16–24°`; a `continuation` shows `hold`, because it
+carries no temperature and the editor never invents one). Dots that would
+overlap stack into up to three lanes — `lanesFor` in `src/DayRow.tsx` uses a
+fixed 3.5 h gap rather than measuring the DOM, so the layout is deterministic
+(and testable) at any viewport width.
+
+A dot is a real `<button>`: **focused is selected** — Tab or click to select it,
+then
+
+| Key | Does |
+|---|---|
+| `↑` / `↓` | temperature ±0.5 °C (±1 °F on a Fahrenheit dial — one `inputStep`, so the on-screen number always moves by one of its own steps) |
+| `←` / `→` | time ±30 min (still on the quarter-hour grid; clamped inside the day) |
+| `Backspace` / `Delete` | remove the setpoint; focus moves to its neighbour so the arrows keep working |
+
+`nudgeTemp` / `nudgeTime` in `src/model.ts` do the arithmetic, going through the
+same display↔wire conversion as the number inputs — which is also what clamps to
+the server's 4.5–32 °C bounds and keeps a `RANGE` band's width. A `continuation`
+returns an empty patch, so `↑` on one changes nothing.
+
+The rows of time/temperature inputs under each timeline are **folded by default**
+(a `<details>` whose summary lists the times, hidden once open). The full list of
+inputs for seven days is a wall you rarely need, and everything the dots show is
+readable without it. They stay in the DOM when folded, which is why the render
+test can still assert against them.
+
+Both the dots and the input rows render with `<Index>`, so a store write updates
+the node under the cursor in place instead of rebuilding the row on every
+keystroke, and `refocus()` re-asserts focus after each mutation (deleting the
+selected dot can leave focus nowhere — in a browser, removing the focused
+element parks it on `<body>`, and the next arrow key would be swallowed). Note
+happy-dom does **not** reproduce that lost-focus case, so the test proves the
+arrows work but cannot prove `refocus` is what keeps them working.
+
 ## Build and test
 
 ```sh
 ./build ui          # bun build + render test, then rebuild the server to embed it
 cd nest-ondevice-server/ui
-bun run build.ts    # -> dist/{index.html,index.js,app.css}   (~50 KB, ~17 KB xz'd)
-bun run test/run.ts # happy-dom render test (24 assertions)
+bun run build.ts    # -> dist/{index.html,index.js,app.css}   (~54 KB, ~17 KB xz'd)
+bun run test/run.ts # happy-dom render test (45 assertions)
 bun x tsc --noEmit  # types
 ```
 

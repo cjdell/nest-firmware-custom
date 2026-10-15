@@ -9,6 +9,7 @@
 import { render } from "solid-js/web";
 
 import { App } from "../src/App";
+import { formatTime, use24h } from "../src/model";
 
 let failures = 0;
 function check(name: string, cond: boolean) {
@@ -136,6 +137,57 @@ if (timeInput) {
   check("time edit snapped to 15 minutes and became 07:00", mon["0"].time === 25200);
   check("continuation entry survived the edit", (JSON.parse(saved[1].body).value.days["0"]["1"] as { entry_type?: string }).entry_type === "continuation");
 }
+
+// --- timeline dots: labelled with the temperature, and keyboard-editable -----
+// The last save re-read the bucket, so we are back to the fixture: Monday is
+// 06:30 @ 20.5 C plus a 09:00 continuation, Tuesday is 07:00 @ 19 C.
+const dots = () => Array.from(root.querySelectorAll("button.dot")) as HTMLButtonElement[];
+const folds = () => Array.from(root.querySelectorAll("details.sp-fold")) as HTMLDetailsElement[];
+const timeOf = (secs: number) => `${(secs / 86400) * 100}%`;
+const timeValue = () => (root.querySelector('input[type="time"]') as HTMLInputElement | null)?.value;
+const key = (el: Element | undefined, k: string) =>
+  el?.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true }));
+
+check("dots are labelled with the temperature inside them", dots()[0]?.textContent?.trim() === "20.5°");
+check("a continuation dot invents no temperature", dots()[1]?.textContent?.trim() === "hold");
+check("dots sit at their time of day", dots()[0]?.style.left === timeOf(23400));
+check("the setpoint list is folded by default", folds().length === 2 && folds().every((f) => !f.open));
+check("the keyboard hint states the steps", text().includes("±0.5°C") && text().includes("±30"));
+check("the folded summary still lists the times", (folds()[0]?.querySelector(".fold-when")?.textContent ?? "").includes(formatTime(23400, use24h())));
+
+dots()[0]?.focus();
+check("a dot takes focus, which is what selected means", document.activeElement === dots()[0]);
+
+key(dots()[0], "ArrowUp");
+await tick(30);
+check("ArrowUp raises the setpoint by half a degree", tempInputs()[0]?.value === "21");
+check("the dot label follows the edit", dots()[0]?.textContent?.trim() === "21°");
+key(dots()[0], "ArrowDown");
+key(dots()[0], "ArrowDown");
+await tick(30);
+check("ArrowDown lowers it by half a degree", tempInputs()[0]?.value === "20");
+check("the dot keeps focus across the re-render", document.activeElement === dots()[0]);
+
+key(dots()[0], "ArrowRight");
+await tick(30);
+check("ArrowRight moves the setpoint half an hour on", timeValue() === "07:00");
+key(dots()[0], "ArrowLeft");
+key(dots()[0], "ArrowLeft");
+await tick(30);
+check("ArrowLeft moves it half an hour back", timeValue() === "06:00");
+check("the dot moved with it", dots()[0]?.style.left === timeOf(21600));
+
+key(dots()[1], "ArrowUp");
+await tick(30);
+check("a continuation has no temperature to nudge", dots()[1]?.textContent?.trim() === "hold" && tempInputs().length === 2);
+
+const rows = setpoints().length;
+key(dots()[0], "Backspace");
+await tick(30);
+check("Backspace deletes the selected setpoint", setpoints().length === rows - 1);
+check("the deleted dot is gone from the timeline", dots()[0]?.textContent?.trim() === "hold");
+check("focus lands on the next dot so the arrows keep working", document.activeElement === dots()[0]);
+check("deleting marks the schedule dirty", button("Save")?.disabled === false);
 
 if (failures) {
   console.log(`\n${failures} RENDER TEST FAILURE(S)`);

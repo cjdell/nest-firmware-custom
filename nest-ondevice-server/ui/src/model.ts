@@ -45,6 +45,15 @@ export const TEMP_MAX_C = 32.0;
 /** Setpoints snap to a quarter hour, like the Nest app. */
 export const TIME_STEP = 900;
 
+/**
+ * Keyboard steps on a timeline dot. Left/right move half an hour; up/down move
+ * one *display* step — 0.5 °C, or 1 °F on a Fahrenheit dial, which is what the
+ * number inputs use too (`inputStep`).
+ */
+export const TIME_NUDGE = 1800;
+export const TEMP_NUDGE_C = 0.5;
+export const TEMP_NUDGE_F = 1;
+
 export interface Setpoint {
   /** Seconds since local midnight, 0..86399. */
   time: number;
@@ -273,6 +282,36 @@ export function inputStep(fahrenheit: boolean): number {
 export function storeTemp(shown: number, fahrenheit: boolean): number {
   const c = fahrenheit ? ((shown - 32) * 5) / 9 : shown;
   return Math.round(clamp(c, TEMP_MIN_C, TEMP_MAX_C) * 2) / 2;
+}
+
+/** The keyboard step in displayed degrees for this dial's scale. */
+export function tempNudge(fahrenheit: boolean): number {
+  return fahrenheit ? TEMP_NUDGE_F : TEMP_NUDGE_C;
+}
+
+/**
+ * Nudge a setpoint by `delta` *displayed* degrees (so ±0.5 on a °C dial, ±1 on
+ * a °F one). Returns the patch to apply, going through the same display/store
+ * conversion as the number inputs — which is also what clamps it to the server's
+ * 4.5-32 °C bounds. A RANGE moves both ends so the band keeps its width; a
+ * continuation carries no temperature, so it returns an empty patch and the
+ * caller changes nothing rather than inventing one.
+ */
+export function nudgeTemp(sp: Setpoint, delta: number, fahrenheit: boolean): Partial<Setpoint> {
+  if (isContinuation(sp)) return {};
+  const step = (celsius: number) => storeTemp(displayTemp(celsius, fahrenheit) + delta, fahrenheit);
+  if (sp.type === "RANGE") {
+    return {
+      "temp-min": step(sp["temp-min"] ?? 0),
+      "temp-max": step(sp["temp-max"] ?? 0),
+    };
+  }
+  return { temp: step(sp.temp ?? 0) };
+}
+
+/** Move a setpoint in time by `delta` seconds, clamped inside the day. */
+export function nudgeTime(secs: number, delta: number): number {
+  return snapTime(secs + delta);
 }
 
 export function tempLabel(sp: Setpoint, fahrenheit: boolean): string {

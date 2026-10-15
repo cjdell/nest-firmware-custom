@@ -75,22 +75,61 @@ input:focus-visible, button:focus-visible, select:focus-visible { outline: 2px s
 .day-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .day-name { font-weight: 600; }
 
+/*
+ * The 24-hour timeline. Dots are labelled pills carrying the setpoint's
+ * temperature, stacked into lanes by DayRow so close-together pills stay
+ * readable; the bar sits under them and the hour ticks under that.
+ */
 .track {
-  position: relative; height: 14px; margin: 8px 2px 18px;
-  background: linear-gradient(90deg, #22262c, #22262c);
-  border-radius: 7px;
+  position: relative;
+  /* Inset by about half a pill so a setpoint at 00:00 or 23:45 cannot hang out
+     of the card (the pills are centred on their time). */
+  margin: 8px 22px 18px;
 }
-.track::before, .track::after {
-  position: absolute; top: 14px; font-size: 10px; color: var(--muted);
+.track::before {
+  content: "";
+  position: absolute; top: 0; left: 0; right: 0; height: 3px;
+  border-radius: 2px; background: #2a2f37;
 }
-.track::before { content: "00"; left: 0; }
-.track::after { content: "24"; right: 0; }
+.track .tick {
+  position: absolute; bottom: -14px; left: 0;
+  font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums;
+}
+.track .tick.end { left: auto; right: 0; }
+
+/* A dot is a button: focus it (Tab or click) and the arrow keys edit it. */
 .dot {
-  position: absolute; top: 3px; width: 8px; height: 8px; margin-left: -4px;
-  border-radius: 50%; background: var(--heat);
+  position: absolute; z-index: 1;
+  min-width: 18px; height: 18px; padding: 0 5px;
+  transform: translateX(-50%);
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid rgba(0, 0, 0, 0.35); border-radius: 9px;
+  background: var(--heat); color: #1d1206;
+  font-size: 11px; font-weight: 600; line-height: 1;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+  cursor: pointer;
 }
 .dot.cool { background: var(--cool); }
 .dot.range { background: var(--range); }
+.dot:hover { filter: brightness(1.15); z-index: 2; }
+/* "Selected" == focused. Deliberately :focus, not :focus-visible, so a click
+   shows the ring too — the arrows work the same either way. */
+.dot:focus { outline: 2px solid var(--text); outline-offset: 2px; z-index: 3; }
+
+/* The setpoint list is folded away until you ask for it (see DayRow). */
+.sp-fold { margin-top: 4px; }
+.sp-fold summary {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  cursor: pointer; list-style: none; padding: 2px 0;
+}
+.sp-fold summary::-webkit-details-marker { display: none; }
+.sp-fold summary::before {
+  content: "▸"; color: var(--muted); font-size: 11px; width: 10px;
+}
+.sp-fold[open] summary::before { content: "▾"; }
+.fold-title { font-size: 12.5px; color: var(--muted); }
+.sp-fold[open] .fold-when { display: none; }
+.fold-when { font-variant-numeric: tabular-nums; }
 
 .sp-list { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 6px; }
 .sp { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -105,6 +144,11 @@ input:focus-visible, button:focus-visible, select:focus-visible { outline: 2px s
 
 footer { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 8px; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+kbd {
+  font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--line);
+  border-bottom-width: 2px; border-radius: 4px; background: var(--bg); color: var(--text);
+}
+.hint { margin: 2px 0 10px; }
 
 @media (max-width: 520px) {
   .sp .when { display: none; }

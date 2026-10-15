@@ -18,6 +18,7 @@ import {
   normalizeSchedule,
   schedulePayload,
   setpointCount,
+  tempNudge,
   use24h,
   validate,
 } from "./model";
@@ -249,6 +250,11 @@ export function App() {
 
       <Show when={schedule()}>
         <Toolbar state={state} dirty={dirty} learning={learning} editor={editor} />
+        <p class="muted hint">
+          Click a dot on a timeline to select it, then <kbd>↑</kbd>/<kbd>↓</kbd> for ±
+          {tempNudge(fahrenheit())}°{fahrenheit() ? "F" : "C"}, <kbd>←</kbd>/<kbd>→</kbd> for ±30
+          min, <kbd>⌫</kbd> to delete. Setpoint times are folded under each day.
+        </p>
         <ol class="days">
           <For each={DAY_KEYS}>
             {(dayKey) => (
