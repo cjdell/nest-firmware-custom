@@ -84,6 +84,10 @@ const setpoints = () => Array.from(root.querySelectorAll("li.sp"));
 const buttons = () => Array.from(root.querySelectorAll("button"));
 const button = (label: string) =>
   buttons().find((b) => (b.textContent ?? "").trim().startsWith(label));
+/** The toolbar's status line, and the saved/unsaved marker inside it. */
+const statusLine = () => root.querySelector(".toolbar .muted")?.textContent ?? "";
+const saveState = () => root.querySelector(".toolbar .dirty, .toolbar .clean")?.textContent ?? "";
+const statusBar = () => root.querySelector(".status");
 
 check("device name rendered", text().includes("Hallway Thermostat"));
 check("device connection state rendered", text().includes("device connected"));
@@ -97,6 +101,14 @@ check("continuation entry has no invented temperature", text().includes("holds t
 check("two setpoints on Monday, one on Tuesday", setpoints().length === 3);
 check("empty day says so", text().includes("Nothing scheduled on Wednesday"));
 check("save is disabled with nothing to do", button("Save")?.disabled === true);
+check("discard is disabled with nothing to discard", button("Discard")?.disabled === true);
+check("the buffer reports itself saved", saveState() === "saved");
+// Heat-only dial (2nd-gen UK + Heat Link): the schedule mode is stated as text
+// and there is no mode picker — the only `select`s left are the seven copy-day
+// ones, one per day row.
+check("schedule mode is stated, not chosen", statusLine().startsWith("HEAT schedule"));
+check("no mode picker on a heat-only dial", root.querySelectorAll("select").length === 7);
+check("nothing has happened yet, so no status bar is rendered", statusBar() === null);
 check("learning-mode switch rendered", !!root.querySelector<HTMLInputElement>('input[type="checkbox"]'));
 check("push button rendered", !!button("Push bucket to device now"));
 
@@ -108,7 +120,12 @@ await tick(30);
 
 check("adding a setpoint adds a row", setpoints().length === 4);
 check("dirty state enables save", button("Save")?.disabled === false);
-check("dirty banner explains the write", text().includes("Unsaved changes"));
+check("discard becomes available", button("Discard")?.disabled === false);
+// The dirty state is a word in the toolbar's fixed status line. It used to be a
+// paragraph between the toolbar and the day rows, which pushed all seven days
+// down every time anything was edited.
+check("dirty state shows inline in the toolbar", saveState() === "unsaved");
+check("editing renders no message in the flow", statusBar() === null && !root.querySelector(".notice"));
 
 button("Save")?.click();
 await tick(80);
@@ -122,7 +139,8 @@ check("days sent as the device-native dict-of-dicts", !!wed && Object.keys(wed).
 check("day keys are 0-6 with Monday first", Object.keys(JSON.parse(saved[0].body).value.days).join(",") === "0,1,2,3,4,5,6");
 check("new setpoint carries entry_type", wed?.["0"]?.entry_type === "setpoint");
 check("unknown top-level fields preserved", payload?.value.schedule_algorithm === "PROGRAM");
-check("save re-reads the bucket", text().includes("Saved."));
+check("save re-reads the bucket", text().includes("if the revision moves"));
+check("the save receipt sits in the fixed bar, not the flow", !!statusBar()?.querySelector(".notice"));
 
 // Time editing writes seconds since midnight, snapped to the quarter hour.
 const timeInput = root.querySelector('input[type="time"]') as HTMLInputElement | null;

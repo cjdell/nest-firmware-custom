@@ -23,6 +23,17 @@
 
 export type Mode = "HEAT" | "COOL" | "RANGE";
 
+/**
+ * The three modes the *wire format* allows — not the three the editor offers.
+ *
+ * The dial this server talks to is a heat-only 2nd-generation UK unit with a
+ * Heat Link: it cannot cool (AGENTS.md trap 18 says it must even publish a
+ * cosmetic `coolingSetpoint` for Google Home to list it). So `makeSetpoint`
+ * only ever writes HEAT and the UI has no mode picker. The other two stay here
+ * because the server validates all three (`cmd_set_schedule`) and a bucket we
+ * cannot edit has to round-trip untouched rather than be silently rewritten —
+ * see the RANGE branch of `normalizeSetpoint` and of `SetpointRow`.
+ */
 export const MODES: readonly Mode[] = ["HEAT", "COOL", "RANGE"];
 
 /** Day keys "0".."6", 0 = Monday (upstream command.py:288). */
@@ -333,21 +344,18 @@ export function nextSlot(existing: Setpoint[]): number {
   return snapTime(Math.min(last + 3 * 3600, 86400 - TIME_STEP));
 }
 
-export function makeSetpoint(mode: Mode, time: number, fahrenheit: boolean): Setpoint {
-  const base: Setpoint = { time: snapTime(time), type: mode, entry_type: "setpoint" };
-  if (mode === "RANGE") {
-    base["temp-min"] = storeTemp(fahrenheit ? 64 : 18, fahrenheit);
-    base["temp-max"] = storeTemp(fahrenheit ? 74 : 24, fahrenheit);
-  } else {
-    base.temp = storeTemp(fahrenheit ? 68 : 20, fahrenheit);
-  }
-  return base;
+export function makeSetpoint(time: number, fahrenheit: boolean): Setpoint {
+  return {
+    time: snapTime(time),
+    type: "HEAT",
+    entry_type: "setpoint",
+    temp: storeTemp(fahrenheit ? 68 : 20, fahrenheit),
+  };
 }
 
 /** Weekday/weekend template, for when the cloud bucket has no schedule yet. */
-export function blankWeek(mode: Mode, fahrenheit: boolean): Days {
+export function blankWeek(fahrenheit: boolean): Days {
   const at = (h: number) => h * 3600;
-  const weekday = (t: number) => makeSetpoint(mode, t, fahrenheit);
   const days: Days = {};
   for (const key of DAY_KEYS) {
     const weekend = key === "5" || key === "6";
@@ -355,13 +363,8 @@ export function blankWeek(mode: Mode, fahrenheit: boolean): Days {
       ? [at(8), at(12), at(18), at(22)]
       : [at(6), at(9), at(17), at(22)];
     days[key] = times.map((t) => {
-      const sp = weekday(t);
-      if (mode === "RANGE") {
-        sp["temp-min"] = storeTemp(fahrenheit ? 60 : 16, fahrenheit);
-        sp["temp-max"] = storeTemp(fahrenheit ? 76 : 24, fahrenheit);
-      } else {
-        sp.temp = storeTemp(fahrenheit ? 61 : 16, fahrenheit);
-      }
+      const sp = makeSetpoint(t, fahrenheit);
+      sp.temp = storeTemp(fahrenheit ? 61 : 16, fahrenheit);
       return sp;
     });
   }

@@ -637,6 +637,7 @@ nest-ondevice-server/         Rust server (src/, Cargo.*, test_smoke.py, deploy/
   build.rs                    embeds ui/dist into the binary (missing ui/ is not an error)
   ui/                         schedule editor SPA: Solid.js + TS, built by Bun (./build ui)
                               dev.ts + mock.ts = the same app on a fake API (./build ui-dev)
+                              heat-only: no mode picker, and no message reflows the page
     src/, test/render.tsx     source + happy-dom render test
     dist/                     the committed bundle that gets embedded (trap 30)
     README.md                 wire format, build/test, what is unproven (trap 29)

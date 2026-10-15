@@ -9,13 +9,44 @@ listener.
 ```
 src/index.html   the shell (hand-written, copied to dist/ verbatim)
 src/index.tsx    mount
-src/App.tsx      state, loading, save, toolbar, learning-mode switch
+src/App.tsx      state, loading, save, toolbar, learning-mode switch, status bar
 src/DayRow.tsx   one weekday: timeline of temperature dots, folded setpoint rows, copy-from-day
 src/model.ts     the wire format, normalisation, validation, time/temp helpers
 src/api.ts       fetch wrappers (same origin, relative paths)
 src/app.css      styling (dark, mobile-first)
 test/render.tsx  mounts the real <App/> against a stubbed API and asserts it works
 ```
+
+## Heat only — there is no mode picker
+
+The dial is a 2nd-generation UK unit with a Heat Link: it heats and cannot cool
+(the same fact that forces the driver to publish a cosmetic `coolingSetpoint`,
+AGENTS.md trap 18). So the editor writes `schedule_mode: "HEAT"`, every setpoint
+it creates is `type: "HEAT"`, and the toolbar *states* the mode as text instead
+of offering a dropdown that could only ever say one thing.
+
+What is deliberately **not** removed is the model's knowledge of `COOL` and
+`RANGE`: `MODES`, `normalizeSetpoint`, `nudgeTemp`, `tempLabel`, `validate` and
+the two-input branch of `SetpointRow` all still handle them, because the server
+validates all three and a bucket this editor cannot create must still read back
+and round-trip untouched rather than be silently collapsed onto `temp`. If a
+bucket ever arrives as `RANGE` the status bar says so. `DEV_RANGE=1` below is
+how that path is exercised.
+
+## Nothing moves to talk to you
+
+Every message — errors, validation, the post-save receipt, the mode warning —
+renders in `.status`, a bar pinned to the bottom of the viewport, and the
+toolbar has a fixed shape: the mode is text, `Discard` is always present and
+merely disabled, and the `saved`/`unsaved` marker always holds its slot.
+
+Both halves are the fix for the same bug: the messages used to sit in the flow
+between the toolbar and the day rows, and `dirty` used to insert an "Unsaved
+changes" paragraph, so the page grew by two lines on the first keystroke and
+after every save — which on a phone slid the dot you were editing out from under
+your thumb mid-drag. The render test asserts the mechanism, not just the copy:
+no `.status` element exists until there is something to say, and editing marks
+the toolbar dirty without rendering anything in the flow.
 
 ## Editing a day
 
@@ -60,7 +91,7 @@ arrows work but cannot prove `refocus` is what keeps them working.
 ./build ui          # bun build + render test, then rebuild the server to embed it
 cd nest-ondevice-server/ui
 bun run build.ts    # -> dist/{index.html,index.js,app.css}   (~54 KB, ~17 KB xz'd)
-bun run test/run.ts # happy-dom render test (45 assertions)
+bun run test/run.ts # happy-dom render test (53 assertions)
 bun x tsc --noEmit  # types
 ```
 
@@ -81,8 +112,10 @@ lands in the browser console instead of a blank page.
 
 Options are env vars: `DEV_PORT=8083 DEV_SCALE=F DEV_RANGE=1 DEV_EMPTY=1
 DEV_LEARNING=1` — scale changes the dial's display unit only (the wire stays
-Celsius), `DEV_RANGE` fakes a heat+cool unit so the RANGE UI is reachable, and
-`DEV_EMPTY` starts with an empty bucket (the "device never rebooted" case).
+Celsius), `DEV_RANGE` fakes a heat+cool unit so the read-only RANGE path is
+reachable (the editor renders and edits a `RANGE` bucket but will not create
+one), and `DEV_EMPTY` starts with an empty bucket (the "device never rebooted"
+case).
 
 The fake is deliberately faithful to `src/control.rs`: the bucket is stored
 device-native (dict-of-dicts), `set_schedule` is a full replacement that bumps
@@ -138,8 +171,10 @@ Dependencies are pinned in `package-lock.json` (`npm ci` to reproduce). Note
 * `time` is **seconds since local midnight** (0–86399); the editor snaps to the
   quarter hour like the Nest app.
 * `type` is `HEAT`/`COOL`/`RANGE`; `RANGE` carries `temp-min`/`temp-max` instead
-  of `temp`. Temperatures are **always Celsius on the wire** — the °F dial is a
-  display setting, so the editor converts on the way in and out.
+  of `temp`. The editor only ever **writes** `HEAT` (see "Heat only" above) but
+  reads and round-trips all three. Temperatures are **always Celsius on the
+  wire** — the °F dial is a display setting, so the editor converts on the way in
+  and out.
 * `entry_type: "continuation"` is a device-native marker meaning "the previous
   setpoint still holds"; it carries **no** temperature and the editor never
   invents one for it.

@@ -4,7 +4,7 @@
  * Same-origin by construction: the server embeds and serves this bundle, so
  * every call is a relative path and there is nothing to configure.
  */
-import type { DeviceStatus, ScheduleResponse, Mode } from "./model";
+import type { DeviceStatus, ScheduleResponse } from "./model";
 
 export interface CommandResult {
   success: boolean;
@@ -47,14 +47,6 @@ export async function setSchedule(serial: string, schedule: unknown): Promise<Co
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ serial, command: "set_schedule", value: schedule }),
-  });
-}
-
-export async function setScheduleMode(serial: string, mode: Mode): Promise<CommandResult> {
-  return request<CommandResult>("/command", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ serial, command: "set_schedule_mode", value: mode }),
   });
 }
 

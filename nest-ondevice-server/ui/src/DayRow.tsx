@@ -6,7 +6,6 @@ import {
   TEMP_MAX_C,
   TEMP_MIN_C,
   TIME_NUDGE,
-  type Mode,
   type Setpoint,
   clamp,
   displayTemp,
@@ -29,7 +28,6 @@ import {
 export interface Editor {
   setDay(dayKey: string, next: Setpoint[]): void;
   copyDay(from: string, to: string): void;
-  setMode(mode: Mode): void;
   reload(): void;
   save(): void;
   push(): void;
@@ -90,7 +88,6 @@ function dotText(sp: Setpoint, fahrenheit: boolean): string {
 export function DayRow(props: {
   dayKey: string;
   entries: () => Setpoint[];
-  mode: () => Mode;
   editor: Editor;
 }) {
   const dayKey = () => props.dayKey;
@@ -104,7 +101,8 @@ export function DayRow(props: {
   const patch = (index: number, changes: Partial<Setpoint>) =>
     write(props.entries().map((sp, i) => (i === index ? { ...sp, ...changes } : sp)));
 
-  const add = () => write([...props.entries(), makeSetpoint(props.mode(), nextSlot(props.entries()), props.editor.fahrenheit())]);
+  const add = () =>
+    write([...props.entries(), makeSetpoint(nextSlot(props.entries()), props.editor.fahrenheit())]);
 
   const remove = (index: number) => write(props.entries().filter((_, i) => i !== index));
 
@@ -243,7 +241,6 @@ export function DayRow(props: {
               <SetpointRow
                 sp={sp()}
                 index={i}
-                mode={props.mode()}
                 fahrenheit={props.editor.fahrenheit()}
                 clock24={props.editor.clock24}
                 onPatch={(changes) => patch(i, changes)}
@@ -260,12 +257,15 @@ export function DayRow(props: {
 function SetpointRow(props: {
   sp: Setpoint;
   index: number;
-  mode: Mode;
   fahrenheit: boolean;
   clock24: boolean;
   onPatch: (changes: Partial<Setpoint>) => void;
   onRemove: () => void;
 }) {
+  // Only ever true for a bucket the device published as a heat+cool RANGE: the
+  // editor is heat-only and offers no way to create one (see model.ts), but a
+  // schedule it cannot make must still be readable and editable rather than
+  // silently collapsed onto `temp`.
   const range = () => props.sp.type === "RANGE";
 
   const editTemp = (shown: number) => {

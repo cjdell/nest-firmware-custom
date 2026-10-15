@@ -5,16 +5,13 @@ import * as api from "./api";
 import { DayRow, type Editor } from "./DayRow";
 import {
   DAY_KEYS,
-  MODES,
   type Days,
   type DeviceStatus,
-  type Mode,
   type Schedule,
   blankWeek,
   clone,
   ensureDays,
   isFahrenheit,
-  normalizeMode,
   normalizeSchedule,
   schedulePayload,
   setpointCount,
@@ -61,18 +58,25 @@ export function App() {
   const learning = () => isOn(device()?.learning_mode);
 
   /**
-   * The thermostat regenerates the bucket when its HVAC mode changes, so a heat
-   * schedule edited while the dial is in cool mode is edited against a bucket
-   * that is about to be replaced. Warn; do not block.
+   * The two ways this editor can be editing the wrong thing, neither of which
+   * shows up in the bucket. The dial regenerates the schedule when its HVAC mode
+   * changes, so a heat schedule edited while it sits in cool mode is edited
+   * against a bucket that is about to be replaced; and a bucket that is not a
+   * heat schedule cannot have been written by this dial (it only heats) and
+   * cannot be created by this editor either — it can only be read back.
    */
-  const modeMismatch = () => {
+  const modeWarning = () => {
     const wanted = state.schedule?.schedule_mode;
+    if (wanted && wanted !== "HEAT") {
+      return `this bucket is a ${wanted} schedule, which this heat-only dial did not write and this editor cannot write — it reads back untouched, but every setpoint you add is HEAT`;
+    }
     const actual = String(device()?.mode ?? "").toLowerCase();
-    if (!wanted || wanted === "RANGE" || !actual || actual === "off") return "";
-    if (wanted === "HEAT" && actual !== "heat") return `heat schedule, dial in ${actual} mode`;
-    if (wanted === "COOL" && actual !== "cool") return `cool schedule, dial in ${actual} mode`;
-    return "";
+    if (!actual || actual === "heat" || actual === "off" || actual === "emergency-heat") return "";
+    return `dial in ${actual} mode — the thermostat rewrites the schedule bucket when its mode changes, so re-read after you switch modes`;
   };
+
+  /** Client-side mirror of the server's validation, shown in the status bar. */
+  const problems = createMemo(() => (state.schedule ? validate(state.schedule) : []));
 
   async function loadDevices() {
     setState({ loadingDevices: true, error: "" });
@@ -112,9 +116,9 @@ export function App() {
   async function save() {
     const current = state.schedule;
     if (!current) return;
-    const problems = validate(current);
-    if (problems.length) {
-      setState("error", problems.slice(0, 3).join(" · "));
+    const bad = validate(current);
+    if (bad.length) {
+      setState("error", bad.slice(0, 3).join(" · "));
       return;
     }
     setState({ saving: true, error: "", notice: "" });
@@ -122,8 +126,7 @@ export function App() {
       const res = await api.setSchedule(state.serial, schedulePayload(current));
       if (!res.success) throw new Error(res.message ?? "the server rejected the schedule");
       await loadSchedule(
-        "Saved. This is what the cloud bucket holds now — if it changes again without you " +
-          "touching anything, the thermostat re-published its own schedule over ours.",
+        "Saved — if the revision moves without you editing anything, the dial re-published its own schedule over ours.",
       );
     } catch (e) {
       setState("error", message(e));
@@ -170,9 +173,8 @@ export function App() {
   }
 
   function startBlank() {
-    const mode = normalizeMode(device()?.schedule_mode ?? "HEAT");
     setState({
-      schedule: { ver: 2, name: "", schedule_mode: mode, days: blankWeek(mode, fahrenheit()) },
+      schedule: { ver: 2, name: "", schedule_mode: "HEAT", days: blankWeek(fahrenheit()) },
       error: "",
       notice: "Built a weekday/weekend program locally. Save to push it to the thermostat.",
     });
@@ -181,7 +183,6 @@ export function App() {
   const editor: Editor = {
     setDay: (dayKey, next) => mutate((days) => void (days[dayKey] = next)),
     copyDay: (from, to) => mutate((days) => void (days[to] = clone(days[from] ?? []))),
-    setMode: (mode) => mutate((_days, s) => void (s.schedule_mode = mode)),
     reload: () => void loadSchedule("Re-read the cloud bucket."),
     save: () => void save(),
     push: () => void pushToDevice(),
@@ -228,22 +229,10 @@ export function App() {
         </Show>
       </header>
 
-      <Show when={state.error}>
-        <p class="error">{state.error}</p>
-      </Show>
-      <Show when={state.notice}>
-        <p class="notice">{state.notice}</p>
-      </Show>
-
-      <Show when={modeMismatch()}>
-        {(why) => (
-          <p class="notice">
-            {why()} — the thermostat rewrites the schedule bucket when its mode changes, so
-            re-read after you switch modes.
-          </p>
-        )}
-      </Show>
-
+      {/*
+       * Errors, confirmations and warnings all render in the fixed bar at the
+       * bottom of this file, never in the flow — see .status in app.css.
+       */}
       <Show when={state.loadingDevices}>
         <p class="muted">Looking for thermostats…</p>
       </Show>
@@ -261,7 +250,6 @@ export function App() {
               <DayRow
                 dayKey={dayKey}
                 entries={() => schedule()?.days[dayKey] ?? []}
-                mode={() => schedule()?.schedule_mode ?? "HEAT"}
                 editor={editor}
               />
             )}
@@ -292,11 +280,31 @@ export function App() {
       <footer>
         <p class="muted">
           Reads <code>GET /api/schedule</code>; writes <code>POST /command</code> with{" "}
-          <code>set_schedule</code>. Day 0 is Monday, each setpoint runs until the next one, so the
-          first entry of a day is the wake-up temperature. Times are stored as seconds since local
-          midnight and temperatures as Celsius, whatever the dial shows.
+          <code>set_schedule</code> — Save replaces the whole <code>schedule.{state.serial}</code>{" "}
+          bucket and pushes it to the dial on its held long-poll connection. Heat only: this dial
+          has a Heat Link and cannot cool, so every setpoint is <code>HEAT</code>. Day 0 is Monday,
+          each setpoint runs until the next one, so the first entry of a day is the wake-up
+          temperature. Times are stored as seconds since local midnight and temperatures as Celsius,
+          whatever the dial shows.
         </p>
       </footer>
+
+      <Show when={state.error || state.notice || modeWarning() || problems().length}>
+        <div class="status" role="status" aria-live="polite">
+          <Show when={state.error}>
+            <p class="error">{state.error}</p>
+          </Show>
+          <Show when={problems().length}>
+            <p class="error">{problems().slice(0, 3).join(" · ")}</p>
+          </Show>
+          <Show when={state.notice}>
+            <p class="notice">{state.notice}</p>
+          </Show>
+          <Show when={modeWarning()}>
+            {(why) => <p class="notice">{why()}</p>}
+          </Show>
+        </div>
+      </Show>
     </main>
   );
 }
@@ -307,7 +315,6 @@ function Toolbar(props: {
     readonly original: string;
     readonly revision: number;
     readonly lastSync: string;
-    readonly serial: string;
     readonly loadingSchedule: boolean;
     readonly saving: boolean;
   };
@@ -316,45 +323,44 @@ function Toolbar(props: {
   editor: Editor;
 }) {
   const schedule = () => props.state.schedule as Schedule;
-  const errors = createMemo(() => validate(schedule()));
+  const count = () => setpointCount(schedule().days);
 
   return (
     <>
+      {/*
+       * One row of a fixed shape, because a toolbar that changes size moves the
+       * seven day rows under your thumb: the schedule mode is stated as text (a
+       * heat-only dial has no mode to pick, and a dropdown that can only ever
+       * say HEAT is a lie about capability), Discard is always present and
+       * merely disabled, and the saved/unsaved marker always holds its slot.
+       * What Save *does* is written once in the footer instead of being
+       * announced every time the buffer goes dirty.
+       */}
       <section class="toolbar">
-        <label>
-          Mode{" "}
-          <select
-            value={schedule().schedule_mode}
-            onInput={(e) => props.editor.setMode(normalizeMode(e.currentTarget.value) as Mode)}
-          >
-            <For each={MODES}>{(m) => <option value={m}>{m}</option>}</For>
-          </select>
-        </label>
         <span class="muted">
-          {setpointCount(schedule().days)} setpoints · rev {props.state.revision}
+          {schedule().schedule_mode} schedule · {count()} setpoint{count() === 1 ? "" : "s"} · rev{" "}
+          {props.state.revision}
           <Show when={props.state.lastSync}> · read {props.state.lastSync}</Show>
+          {" · "}
+          <span class={props.dirty() ? "dirty" : "clean"}>
+            {props.dirty() ? "unsaved" : "saved"}
+          </span>
         </span>
         <span class="grow" />
         <button onClick={props.editor.reload} disabled={props.state.loadingSchedule}>
           {props.state.loadingSchedule ? "Reading…" : "Re-read"}
         </button>
-        <Show when={props.dirty()}>
-          <button onClick={props.editor.discard}>Discard</button>
-        </Show>
-        <button class="primary" onClick={props.editor.save} disabled={!props.dirty() || props.state.saving}>
+        <button onClick={props.editor.discard} disabled={!props.dirty() || props.state.saving}>
+          Discard
+        </button>
+        <button
+          class="primary save"
+          onClick={props.editor.save}
+          disabled={!props.dirty() || props.state.saving}
+        >
           {props.state.saving ? "Saving…" : props.dirty() ? "Save" : "Saved"}
         </button>
       </section>
-
-      <Show when={props.dirty()}>
-        <p class="notice">
-          Unsaved changes. Save replaces the <code>schedule.{props.state.serial}</code> bucket and
-          pushes it to the thermostat on its held long-poll connection.
-        </p>
-      </Show>
-      <Show when={errors().length}>
-        <p class="error">{errors().slice(0, 3).join(" · ")}</p>
-      </Show>
 
       <section class="toolbar bottom">
         <label class="switch">

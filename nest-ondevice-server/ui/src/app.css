@@ -22,7 +22,7 @@ body {
   -webkit-text-size-adjust: 100%;
 }
 
-.wrap { max-width: 780px; margin: 0 auto; padding: 14px 14px 48px; }
+.wrap { max-width: 780px; margin: 0 auto; padding: 14px 14px 84px; }
 
 header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; margin-bottom: 10px; }
 header h1 { font-size: 19px; margin: 0; font-weight: 600; }
@@ -35,6 +35,8 @@ p { margin: 8px 0; }
 .muted { color: var(--muted); font-size: 12.5px; }
 .error { color: var(--err); font-size: 13px; }
 .notice { color: var(--warn); font-size: 13px; }
+.dirty { color: var(--warn); }
+.clean { color: var(--muted); }
 .grow { flex: 1 1 auto; }
 .pad { padding: 6px 0; }
 
@@ -62,6 +64,26 @@ input:focus-visible, button:focus-visible, select:focus-visible { outline: 2px s
 }
 .toolbar.bottom { border-bottom: 1px solid var(--line); margin-top: 6px; }
 .toolbar label { font-size: 13px; color: var(--muted); }
+/* "Save" / "Saved" / "Saving…" swap width otherwise; the row holds still. */
+.toolbar .save { min-width: 6.2em; text-align: center; }
+
+/*
+ * Every message the app produces — errors, validation, the post-save receipt,
+ * the mode warning — renders here, pinned to the bottom of the viewport.
+ * They used to sit in the flow between the toolbar and the day rows, so the
+ * page grew by two lines every time the buffer went dirty, a save finished or a
+ * request failed — which shoved the dot you were editing out from under your
+ * thumb on a phone. Nothing in this app reflows to talk to you any more.
+ */
+.status {
+  position: fixed; z-index: 10; left: 0; right: 0; bottom: 0;
+  display: grid; gap: 3px;
+  padding: 9px 14px;
+  padding-bottom: calc(9px + env(safe-area-inset-bottom, 0px));
+  background: #191c21;
+  border-top: 1px solid var(--line);
+}
+.status p { margin: 0; }
 
 .days { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 8px; }
 
